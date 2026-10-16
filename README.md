@@ -1,3 +1,5 @@
+<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Pg-Helix/helix-studio/main/brand/logo/logo-horizontal-dark-bg.svg"><img src="https://raw.githubusercontent.com/Pg-Helix/helix-studio/main/brand/logo/logo-horizontal.svg" alt="PgHelix" width="280"></picture></p>
+
 # helix-cortex
 
 Connectors, ingestion, embeddings, semantic catalog, retrieval, RAG and evaluation.
