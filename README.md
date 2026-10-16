@@ -18,7 +18,7 @@ Organization master prompt: PgHelix Organization Master Prompt, 16 Oct 2026.
 
 ## License
 
-Not yet decided. The license is an ADR in `helix-atlas`; until it is accepted, no license is granted and all rights are reserved.
+Proprietary, all rights reserved. See [LICENSE](LICENSE).
 
 ## Contributing
 
