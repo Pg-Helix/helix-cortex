@@ -18,7 +18,7 @@ Organization master prompt: PgHelix Organization Master Prompt, 16 Oct 2026.
 
 ## License
 
-Proprietary, all rights reserved. See [LICENSE](LICENSE) (draft, pending legal review; decision in ADR-0001).
+Proprietary, all rights reserved. See [LICENSE](LICENSE) (adapted from the NeuronDB software license model; pending legal review, ADR-0001).
 
 ## Contributing
 
