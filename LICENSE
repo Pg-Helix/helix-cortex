@@ -1,0 +1,24 @@
+PgHelix Proprietary Software License (DRAFT, pending legal review)
+
+Copyright (c) 2026 PgHelix. All rights reserved.
+
+This repository and everything in it (source code, documentation, schemas,
+designs, assets and any derivatives, together the "Software") is the
+proprietary property of PgHelix ("Licensor").
+
+No license or right is granted to copy, modify, distribute, sublicense,
+host, sell, or create derivative works of the Software, or to use it for any
+commercial purpose, except under a separate written agreement signed by
+Licensor. Viewing the public source on GitHub is permitted for evaluation
+only.
+
+Third-party components referenced or included remain under their own
+licenses and notices, which are preserved and are not affected by this
+license.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED. TO THE MAXIMUM EXTENT PERMITTED BY LAW, LICENSOR IS NOT LIABLE FOR
+ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING FROM THE SOFTWARE OR ITS USE.
+
+Contact: open a private security advisory or an issue in the relevant
+repository.
