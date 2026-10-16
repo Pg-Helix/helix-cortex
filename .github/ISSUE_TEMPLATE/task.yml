@@ -1,0 +1,15 @@
+name: Task
+description: A scoped piece of work
+labels: [task]
+body:
+  - type: textarea
+    id: goal
+    attributes: {label: Goal and user value, description: What workflow does this enable?}
+    validations: {required: true}
+  - type: textarea
+    id: accept
+    attributes: {label: Acceptance criteria, description: Measurable; include failure behaviour.}
+    validations: {required: true}
+  - type: input
+    id: design
+    attributes: {label: Design link (helix-atlas RFC/ADR)}

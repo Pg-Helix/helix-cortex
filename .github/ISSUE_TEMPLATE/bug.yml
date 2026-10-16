@@ -1,0 +1,12 @@
+name: Bug
+description: Something behaves differently from its documented contract
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes: {label: What happened, description: "Expected vs actual. Never paste credentials or tenant data."}
+    validations: {required: true}
+  - type: textarea
+    id: repro
+    attributes: {label: Reproduction, description: Versions (PostgreSQL, component), steps, logs.}
+    validations: {required: true}
