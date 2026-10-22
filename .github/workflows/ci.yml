@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - run: gofmt -l . | tee /tmp/fmt.out && [ ! -s /tmp/fmt.out ]
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./... -race -cover
+
+  # Real-database integration test, with its own job (not folded into
+  # `test` above) so it's unmissable in the checks list. This job must
+  # fail if its DB setup is absent -- it is never allowed to be green
+  # because TestIntegration_* skipped; the final grep below enforces that.
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: Checkout pinned helix-kernel
+        uses: actions/checkout@v4
+        with:
+          repository: Pg-Helix/helix-kernel
+          ref: 5f5895e5d3efd6e623d4366ab871dc7e9d251f91
+          path: kernel-checkout
+      - name: Start a kernel-extension PostgreSQL, then run the integration test against it
+        run: |
+          KERNEL_DIR="$PWD/kernel-checkout" sh ci/start-test-db.sh > /tmp/kerneldb.env
+          # Sourced as shell, not appended to $GITHUB_ENV: that file is
+          # parsed verbatim by the runner (no shell quote-removal), so
+          # the quoted `export VAR='...'` lines this script prints would
+          # end up with their literal quotes as part of the value --
+          # exactly the bug that made this job's first real CI run
+          # silently fall back to a Unix-socket/default-user connection
+          # instead of failing loudly or connecting correctly.
+          . /tmp/kerneldb.env
+          go test ./internal/worker/... -run TestIntegration -v | tee /tmp/integration.out
+          grep -q '^--- PASS: TestIntegration_CrashReleaseAndDuplicateDelivery' /tmp/integration.out \
+            || { echo "integration test did not report PASS (skipped or failed) -- failing the job"; exit 1; }
