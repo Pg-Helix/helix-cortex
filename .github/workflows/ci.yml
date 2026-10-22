@@ -17,3 +17,28 @@ jobs:
       - run: go build ./...
       - run: go vet ./...
       - run: go test ./... -race -cover
+
+  # Real-database integration test, with its own job (not folded into
+  # `test` above) so it's unmissable in the checks list. This job must
+  # fail if its DB setup is absent -- it is never allowed to be green
+  # because TestIntegration_* skipped; the final grep below enforces that.
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: Checkout pinned helix-kernel
+        uses: actions/checkout@v4
+        with:
+          repository: Pg-Helix/helix-kernel
+          ref: 5f5895e5d3efd6e623d4366ab871dc7e9d251f91
+          path: kernel-checkout
+      - name: Start a kernel-extension PostgreSQL
+        run: KERNEL_DIR="$PWD/kernel-checkout" sh ci/start-test-db.sh | sed 's/^export //' >> "$GITHUB_ENV"
+      - name: Run the real-database integration test (must not skip)
+        run: |
+          go test ./internal/worker/... -run TestIntegration -v | tee /tmp/integration.out
+          grep -q '^--- PASS: TestIntegration_CrashReleaseAndDuplicateDelivery' /tmp/integration.out \
+            || { echo "integration test did not report PASS (skipped or failed) -- failing the job"; exit 1; }
