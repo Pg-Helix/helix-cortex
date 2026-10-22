@@ -35,10 +35,17 @@ jobs:
           repository: Pg-Helix/helix-kernel
           ref: 5f5895e5d3efd6e623d4366ab871dc7e9d251f91
           path: kernel-checkout
-      - name: Start a kernel-extension PostgreSQL
-        run: KERNEL_DIR="$PWD/kernel-checkout" sh ci/start-test-db.sh | sed 's/^export //' >> "$GITHUB_ENV"
-      - name: Run the real-database integration test (must not skip)
+      - name: Start a kernel-extension PostgreSQL, then run the integration test against it
         run: |
+          KERNEL_DIR="$PWD/kernel-checkout" sh ci/start-test-db.sh > /tmp/kerneldb.env
+          # Sourced as shell, not appended to $GITHUB_ENV: that file is
+          # parsed verbatim by the runner (no shell quote-removal), so
+          # the quoted `export VAR='...'` lines this script prints would
+          # end up with their literal quotes as part of the value --
+          # exactly the bug that made this job's first real CI run
+          # silently fall back to a Unix-socket/default-user connection
+          # instead of failing loudly or connecting correctly.
+          . /tmp/kerneldb.env
           go test ./internal/worker/... -run TestIntegration -v | tee /tmp/integration.out
           grep -q '^--- PASS: TestIntegration_CrashReleaseAndDuplicateDelivery' /tmp/integration.out \
             || { echo "integration test did not report PASS (skipped or failed) -- failing the job"; exit 1; }
