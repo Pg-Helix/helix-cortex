@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Pg-Helix/helix-cortex/internal/ingest"
 	"github.com/Pg-Helix/helix-cortex/internal/worker"
 	"github.com/Pg-Helix/helix-infer/embed"
 	protocol "github.com/Pg-Helix/helix-protocol/gen/go"
@@ -64,6 +65,21 @@ func main() {
 		TargetModel:  targetModel,
 		LeaseSeconds: leaseSeconds,
 		MaxAttempts:  maxAttempts,
+	}
+	// CORTEX_INPUT_EXTRACTOR selects a versioned input-extraction
+	// strategy (ADR-0007): "raw" (default, unmodified from this
+	// worker's original behavior -- the whole get_job_input row,
+	// stringified) or "chunk-text" (extracts only cortex.chunk's own
+	// `text` field, for a worker instance dedicated to Workflow 2's
+	// chunk-embedding target_model -- never the same target_model as a
+	// "raw" instance, or jobs meant for one extractor would be claimed
+	// and misinterpreted by the other).
+	switch extractor := getenv("CORTEX_INPUT_EXTRACTOR", "raw"); extractor {
+	case "raw":
+	case "chunk-text":
+		w.InputExtractor = ingest.ExtractChunkText
+	default:
+		log.Fatalf("cortex: unknown CORTEX_INPUT_EXTRACTOR %q (want \"raw\" or \"chunk-text\")", extractor)
 	}
 
 	log.Printf("cortex: worker loop started for target_model=%s poll_interval=%s", targetModel, pollInterval)

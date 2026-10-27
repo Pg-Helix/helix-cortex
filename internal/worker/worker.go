@@ -56,6 +56,23 @@ type Worker struct {
 	TargetModel  string
 	LeaseSeconds int
 	MaxAttempts  int
+
+	// InputExtractor, if set, extracts the text actually handed to the
+	// embedder from get_job_input's full jsonb row -- added for ADR-0007
+	// (Workflow 2): a chunk row carries document_id/tenant/digests
+	// alongside its own text, and embedding the whole row verbatim would
+	// bury the real content in its own metadata. nil preserves this
+	// worker's original, unmodified behavior (the whole row, stringified)
+	// -- a backward-compatible addition to this contract, not new
+	// behavior for any existing caller.
+	InputExtractor func(json.RawMessage) (string, error)
+}
+
+func (w *Worker) extractInput(raw json.RawMessage) (string, error) {
+	if w.InputExtractor == nil {
+		return string(raw), nil
+	}
+	return w.InputExtractor(raw)
 }
 
 // RunOnce claims at most one job and, if one was claimable, fetches its
@@ -80,7 +97,12 @@ func (w *Worker) RunOnce(ctx context.Context) (handled bool, err error) {
 		return true, fmt.Errorf("worker: get input for job %s: %w", job.JobID, err)
 	}
 
-	res, err := w.Embedder.Embed(ctx, embed.EmbedRequest{Model: job.TargetModel, Input: []string{string(input)}})
+	text, err := w.extractInput(input)
+	if err != nil {
+		return true, fmt.Errorf("worker: extract input for job %s: %w", job.JobID, err)
+	}
+
+	res, err := w.Embedder.Embed(ctx, embed.EmbedRequest{Model: job.TargetModel, Input: []string{text}})
 	if err != nil {
 		// Deliberately does not call PublishResult: an inference failure
 		// (including a dimension mismatch Guarded itself caught) is not one

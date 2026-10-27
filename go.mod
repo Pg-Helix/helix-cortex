@@ -8,7 +8,7 @@ require (
 )
 
 require (
-	github.com/Pg-Helix/helix-protocol v0.0.0-20261021182120-7235ca4611fb // indirect
+	github.com/Pg-Helix/helix-protocol v0.0.0-20261027082639-abdd123b19ea // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
