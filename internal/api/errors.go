@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 
 	"github.com/Pg-Helix/helix-cortex/internal/ingest"
@@ -18,10 +19,18 @@ import (
 // revoked/superseded/deleted/fabricated alike).
 func writeError(w http.ResponseWriter, err error) {
 	code, status, message := classifyError(err)
+	traceID := uuid.NewString()
+	if code == "internal" {
+		// The client only ever sees "internal error" plus a trace id --
+		// the real cause (a SQL error, a context deadline, a bug) is
+		// otherwise invisible anywhere, which is exactly what made the
+		// first real run of this handler undebuggable.
+		log.Printf("cortex-api: internal error trace_id=%s: %v", traceID, err)
+	}
 	writeJSON(w, status, protocol.ErrorResponse{
 		Code:    code,
 		Message: message,
-		TraceId: uuid.NewString(),
+		TraceId: traceID,
 	})
 }
 

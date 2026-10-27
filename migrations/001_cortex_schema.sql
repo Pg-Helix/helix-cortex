@@ -155,15 +155,23 @@ CREATE POLICY document_version_tenant_acl ON cortex.document_version
     )
     WITH CHECK (tenant = current_setting('helix.tenant', true));
 
+-- Tenant-only, NOT principal-ACL'd like the three tables above: this
+-- table is register_source'd with helix-kernel, and get_job_input (a
+-- function in helix-kernel we never modify) re-reads this exact table
+-- by key while running as helix_owner, having set only helix.tenant --
+-- it has no concept of "principal" at all. Reproduced directly against
+-- the real stack: with a principal-EXISTS clause here too,
+-- get_job_input's own re-read returns zero rows (RLS hides them) and
+-- it reports every single job stale_source, forever, which eventually
+-- dead-letters the job after exhausting its retry budget -- not a
+-- security feature, a correctness bug that silently breaks every
+-- embedding job. Principal-level ACL for chunk reads is instead
+-- enforced explicitly inside cortex's own retrieval/status queries
+-- (internal/store), which already join collection_permission for other
+-- reasons -- "filtered inside the query before LIMIT" remains true,
+-- just not via a blanket policy on this one kernel-touched table.
 ALTER TABLE cortex.chunk ENABLE ROW LEVEL SECURITY;
 ALTER TABLE cortex.chunk FORCE ROW LEVEL SECURITY;
 CREATE POLICY chunk_tenant_acl ON cortex.chunk
-    USING (
-        tenant = current_setting('helix.tenant', true)
-        AND EXISTS (
-            SELECT 1 FROM cortex.collection_permission cp
-            WHERE cp.collection_id = chunk.collection_id
-              AND cp.principal = current_setting('helix.principal', true)
-        )
-    )
+    USING (tenant = current_setting('helix.tenant', true))
     WITH CHECK (tenant = current_setting('helix.tenant', true));

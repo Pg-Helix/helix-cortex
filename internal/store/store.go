@@ -11,9 +11,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/Pg-Helix/helix-cortex/internal/auth"
 	protocol "github.com/Pg-Helix/helix-protocol/gen/go"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -111,15 +113,22 @@ const chunkPipelineVersion = "cortex-chunk-pipeline-v1"
 func (s *Store) CreateCollection(ctx context.Context, p auth.Principal, name string) (protocol.Collection, error) {
 	var out protocol.Collection
 	err := s.withTenant(ctx, p, func(tx pgx.Tx) error {
-		row := tx.QueryRow(ctx, `
-			INSERT INTO cortex.collection (tenant, name) VALUES ($1, $2)
-			RETURNING id, tenant, name, created_at
-		`, p.Tenant, name)
-		var id string
-		if err := row.Scan(&id, &out.Tenant, &out.Name, &out.CreatedAt); err != nil {
+		// Every value is generated client-side and the INSERT below has
+		// no RETURNING at all: RETURNING's visibility check uses the
+		// policy's USING clause regardless of which columns are
+		// returned, and this table's USING clause requires an existing
+		// collection_permission row for the caller -- which cannot exist
+		// yet for a collection that doesn't exist yet. Reproduced
+		// directly against the real stack ("new row violates row-level
+		// security policy") before this fix; confirmed RETURNING any
+		// column (not just id) hits the same check.
+		id := uuid.NewString()
+		createdAt := time.Now().UTC()
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO cortex.collection (id, tenant, name, created_at) VALUES ($1, $2, $3, $4)
+		`, id, p.Tenant, name, createdAt); err != nil {
 			return fmt.Errorf("store: create collection: %w", err)
 		}
-		out.Id = id
 		_, err := tx.Exec(ctx, `
 			INSERT INTO cortex.collection_permission (collection_id, tenant, principal, role, granted_by)
 			VALUES ($1, $2, $3, 'owner', $3)
@@ -127,6 +136,7 @@ func (s *Store) CreateCollection(ctx context.Context, p auth.Principal, name str
 		if err != nil {
 			return fmt.Errorf("store: grant creator ownership: %w", err)
 		}
+		out = protocol.Collection{Id: id, Tenant: p.Tenant, Name: name, CreatedAt: createdAt}
 		return nil
 	})
 	return out, err
