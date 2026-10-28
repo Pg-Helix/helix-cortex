@@ -33,22 +33,30 @@ type Server struct {
 }
 
 func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/collections", s.createCollection)
-	mux.HandleFunc("POST /v1/collections/{collectionId}/documents", s.ingestDocument)
-	mux.HandleFunc("GET /v1/collections/{collectionId}/documents/{documentId}", s.getDocument)
-	mux.HandleFunc("DELETE /v1/collections/{collectionId}/documents/{documentId}", s.deleteDocument)
-	mux.HandleFunc("GET /v1/collections/{collectionId}/permissions", s.listPermissions)
-	mux.HandleFunc("POST /v1/collections/{collectionId}/permissions", s.grantPermission)
-	mux.HandleFunc("DELETE /v1/collections/{collectionId}/permissions/{principal}", s.revokePermission)
-	mux.HandleFunc("GET /v1/evidence/{chunkId}", s.getEvidence)
-	mux.HandleFunc("POST /v1/search", s.search)
-	mux.HandleFunc("POST /v1/answers", s.getAnswer)
+	business := http.NewServeMux()
+	business.HandleFunc("POST /v1/collections", s.createCollection)
+	business.HandleFunc("POST /v1/collections/{collectionId}/documents", s.ingestDocument)
+	business.HandleFunc("GET /v1/collections/{collectionId}/documents/{documentId}", s.getDocument)
+	business.HandleFunc("DELETE /v1/collections/{collectionId}/documents/{documentId}", s.deleteDocument)
+	business.HandleFunc("GET /v1/collections/{collectionId}/permissions", s.listPermissions)
+	business.HandleFunc("POST /v1/collections/{collectionId}/permissions", s.grantPermission)
+	business.HandleFunc("DELETE /v1/collections/{collectionId}/permissions/{principal}", s.revokePermission)
+	business.HandleFunc("GET /v1/evidence/{chunkId}", s.getEvidence)
+	business.HandleFunc("POST /v1/search", s.search)
+	business.HandleFunc("POST /v1/answers", s.getAnswer)
+
+	top := http.NewServeMux()
+	top.Handle("/v1/", authMiddleware(s.Authenticator, business))
 	if s.TestHooks != nil {
-		mux.HandleFunc("GET /__test/barrier/{token}/status", s.testBarrierStatus)
-		mux.HandleFunc("POST /__test/barrier/{token}/release", s.testBarrierRelease)
+		// Deliberately NOT behind authMiddleware: these exist only for
+		// the acceptance suite's deterministic in-flight-revocation
+		// barrier (ADR-0007) to drive directly, and are only even
+		// registered when CORTEX_TEST_HOOKS=1 is explicitly set (see
+		// cmd/cortex-api) -- never present in a normal deployment.
+		top.HandleFunc("GET /__test/barrier/{token}/status", s.testBarrierStatus)
+		top.HandleFunc("POST /__test/barrier/{token}/release", s.testBarrierRelease)
 	}
-	return authMiddleware(s.Authenticator, mux)
+	return top
 }
 
 // checkTenant implements ADR-0007 decision 1: a request body's tenant
