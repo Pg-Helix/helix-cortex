@@ -151,6 +151,61 @@ func TestRunOnce_CancellationNeverPublishes(t *testing.T) {
 	}
 }
 
+// recordingProvider captures the Input it was actually asked to embed --
+// used to prove InputExtractor controls what reaches the embedder, not
+// just that RunOnce still succeeds.
+type recordingProvider struct {
+	dims     int
+	lastReq  embed.EmbedRequest
+	provider embed.EmbeddingProvider
+}
+
+func (r *recordingProvider) Embed(ctx context.Context, req embed.EmbedRequest) (*embed.EmbedResult, error) {
+	r.lastReq = req
+	return r.provider.Embed(ctx, req)
+}
+
+func TestRunOnce_InputExtractor_Nil_UsesWholeRowStringified(t *testing.T) {
+	job := &Job{JobID: "job-1", LeaseEpoch: 1, SourceDigest: "d1", TargetModel: "mock:v1", PipelineVersion: "p1"}
+	raw := json.RawMessage(`{"id":1,"body":"hello"}`)
+	src := &fakeSource{job: job, input: raw}
+	rec := &recordingProvider{dims: 8, provider: embed.NewMock(8)}
+	w := &Worker{Source: src, Embedder: mustEmbedder(t, 8, rec), TargetModel: "mock:v1"}
+
+	if _, err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(rec.lastReq.Input) != 1 || rec.lastReq.Input[0] != string(raw) {
+		t.Fatalf("expected the whole raw row as input, got %q", rec.lastReq.Input)
+	}
+}
+
+func TestRunOnce_InputExtractor_Chunk_ExtractsOnlyText(t *testing.T) {
+	job := &Job{JobID: "job-1", LeaseEpoch: 1, SourceDigest: "d1", TargetModel: "mock:v1", PipelineVersion: "p1"}
+	raw := json.RawMessage(`{"document_id":"doc-1","tenant":"acme","text":"the real passage"}`)
+	src := &fakeSource{job: job, input: raw}
+	rec := &recordingProvider{dims: 8, provider: embed.NewMock(8)}
+	w := &Worker{
+		Source: src, Embedder: mustEmbedder(t, 8, rec), TargetModel: "mock:v1",
+		InputExtractor: func(raw json.RawMessage) (string, error) {
+			var row struct {
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(raw, &row); err != nil {
+				return "", err
+			}
+			return row.Text, nil
+		},
+	}
+
+	if _, err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(rec.lastReq.Input) != 1 || rec.lastReq.Input[0] != "the real passage" {
+		t.Fatalf("expected only the text field as input, got %q", rec.lastReq.Input)
+	}
+}
+
 func TestRunOnce_RejectedOutcomeIsAnError(t *testing.T) {
 	job := &Job{JobID: "job-1", LeaseEpoch: 1, SourceDigest: "d1", TargetModel: "mock:v1", PipelineVersion: "p1"}
 	src := &fakeSource{job: job, input: json.RawMessage(`{"id":1}`), outcome: OutcomeStaleLease}
