@@ -53,8 +53,13 @@ func (s *Server) Handler() http.Handler {
 		// barrier (ADR-0007) to drive directly, and are only even
 		// registered when CORTEX_TEST_HOOKS=1 is explicitly set (see
 		// cmd/cortex-api) -- never present in a normal deployment.
-		top.HandleFunc("GET /__test/barrier/{token}/status", s.testBarrierStatus)
-		top.HandleFunc("POST /__test/barrier/{token}/release", s.testBarrierRelease)
+		// Registered under /v1/ (matching how the client's base URL
+		// actually addresses them) but directly on top, not business:
+		// ServeMux gives this exact pattern precedence over the
+		// "/v1/" subtree pattern above, so it bypasses authMiddleware
+		// for exactly these two routes without needing a path rewrite.
+		top.HandleFunc("GET /v1/__test/barrier/{token}/status", s.testBarrierStatus)
+		top.HandleFunc("POST /v1/__test/barrier/{token}/release", s.testBarrierRelease)
 	}
 	return top
 }
