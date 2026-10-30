@@ -17,7 +17,6 @@ import (
 	protocol "github.com/Pg-Helix/helix-protocol/gen/go"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -64,20 +63,26 @@ func (s *Store) withTenant(ctx context.Context, p auth.Principal, fn func(tx pgx
 }
 
 // ensureSourceRegistered registers cortex.chunk with helix-kernel for
-// the current tenant (set_config'd on tx already) if it isn't already --
-// register_source's own UNIQUE constraint is (tenant, schema, table,
-// model, pipeline), so a brand-new tenant needs its own one-time
-// registration against the same physical table (ADR-0007 decision 3).
-// Idempotent under a concurrent duplicate call: tolerates the unique-
-// violation a race would produce and re-selects.
+// the ACTIVE embedding binding (model ID + revision + dims + metric +
+// pipeline version -- every field of the binding's identity, not just
+// model/pipeline) under the current tenant (set_config'd on tx already).
+// register_source's own UNIQUE constraint now includes model_revision
+// (helix-kernel fix, this milestone): a changed revision under the same
+// model_id/pipeline/tenant/table registers as a genuinely distinct
+// source, never silently reusing an old one. register_source itself is
+// now idempotent (INSERT ... ON CONFLICT DO NOTHING + a fallback SELECT
+// inside the function), so a concurrent duplicate registration race is
+// handled kernel-side -- this method no longer needs to catch a
+// unique_violation and retry in a transaction that call would have left
+// aborted.
 func (s *Store) ensureSourceRegistered(ctx context.Context, tx pgx.Tx) (int64, error) {
 	var id int64
 	err := tx.QueryRow(ctx, `
 		SELECT id FROM helix_ai.source
 		WHERE schema_name = 'cortex' AND table_name = 'chunk'
-		  AND model_id = $1 AND pipeline_version = $2
+		  AND model_id = $1 AND model_revision = $2 AND dims = $3 AND pipeline_version = $4
 		  AND tenant = current_setting('helix.tenant', true)
-	`, s.ChunkModelID, chunkPipelineVersion).Scan(&id)
+	`, s.ChunkModelID, s.ChunkModelRevision, s.ChunkDims, chunkPipelineVersion).Scan(&id)
 	if err == nil {
 		return id, nil
 	}
@@ -87,21 +92,10 @@ func (s *Store) ensureSourceRegistered(ctx context.Context, tx pgx.Tx) (int64, e
 
 	err = tx.QueryRow(ctx, `SELECT helix_ai.register_source('cortex', 'chunk', $1, $2, $3, $4, 'cosine')`,
 		s.ChunkModelID, s.ChunkModelRevision, chunkPipelineVersion, s.ChunkDims).Scan(&id)
-	if err == nil {
-		return id, nil
+	if err != nil {
+		return 0, fmt.Errorf("store: register chunk source: %w", err)
 	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation: a concurrent registration won the race
-		if selErr := tx.QueryRow(ctx, `
-			SELECT id FROM helix_ai.source
-			WHERE schema_name = 'cortex' AND table_name = 'chunk'
-			  AND model_id = $1 AND pipeline_version = $2
-			  AND tenant = current_setting('helix.tenant', true)
-		`, s.ChunkModelID, chunkPipelineVersion).Scan(&id); selErr == nil {
-			return id, nil
-		}
-	}
-	return 0, fmt.Errorf("store: register chunk source: %w", err)
+	return id, nil
 }
 
 // chunkPipelineVersion is frozen here (not ingest.ChunkerVersion) so a

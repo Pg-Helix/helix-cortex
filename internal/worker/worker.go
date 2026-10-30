@@ -113,6 +113,15 @@ func (w *Worker) RunOnce(ctx context.Context) (handled bool, err error) {
 		return true, fmt.Errorf("worker: embed job %s: %w", job.JobID, err)
 	}
 
+	// Defensive even though the adapter's own boundary validation (see
+	// helix-infer/internal/providers) already guarantees len(Vectors) ==
+	// len(Input) == 1 whenever Embed returns no error: a worker that
+	// indexes Vectors[0] unconditionally would panic on any future
+	// provider whose validation has a gap, rather than failing this one
+	// job the way every other embed error above already does.
+	if len(res.Vectors) != 1 {
+		return true, fmt.Errorf("worker: embed job %s: provider returned %d vectors for 1 input", job.JobID, len(res.Vectors))
+	}
 	value, err := json.Marshal(res.Vectors[0])
 	if err != nil {
 		return true, fmt.Errorf("worker: marshal result for job %s: %w", job.JobID, err)
