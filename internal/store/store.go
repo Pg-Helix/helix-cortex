@@ -38,6 +38,18 @@ type Store struct {
 	ChunkModelID       string
 	ChunkModelRevision string
 	ChunkDims          int
+
+	// DisableRerank skips the deterministic lexical-overlap reranker,
+	// serving RRF's own fused order instead. Default false (reranker
+	// stays on, unchanged behavior for every existing caller/test) --
+	// an explicit opt-out, not an opt-in, per helix-labs/eval/PROTOCOL.md
+	// Decision D: measured on this evaluation's real-embedding data,
+	// the reranker's lexical-overlap-first ordering measurably HURT
+	// paraphrase recall relative to RRF's own fused order (dev: 1.000
+	// -> 0.833; held-out: 0.924 -> 0.803 recall@5) -- sorting by lexical
+	// overlap first actively fights a real embedding's whole point on
+	// exactly the queries real embeddings are supposed to help.
+	DisableRerank bool
 }
 
 func (s *Store) targetModel() string {

@@ -163,8 +163,23 @@ func (s *Store) retrievalCandidates(ctx context.Context, p auth.Principal, colle
 	}
 
 	fused := retrieval.RRF(retrieval.DefaultRRFConstant, ftsOrder, denseOrder)
-	reranked = retrieval.Rerank(retrieval.Tokenize(query), fused, textByChunk)
+	reranked = s.rankFused(query, fused, textByChunk)
 	return sourceID, reranked, textByChunk, nil
+}
+
+// rankFused applies the deterministic lexical-overlap reranker to
+// fused's RRF order, unless s.DisableRerank -- see Store.DisableRerank's
+// own doc comment for why this opt-out exists and the measured
+// evidence behind it.
+func (s *Store) rankFused(query string, fused []retrieval.ScoredChunk, textByChunk map[string]string) []retrieval.RerankedChunk {
+	if s.DisableRerank {
+		out := make([]retrieval.RerankedChunk, len(fused))
+		for i, f := range fused {
+			out[i] = retrieval.RerankedChunk{ChunkID: f.ChunkID, FusedScore: f.Score}
+		}
+		return out
+	}
+	return retrieval.Rerank(retrieval.Tokenize(query), fused, textByChunk)
 }
 
 // Search runs hybrid retrieval and returns the final (fused, reranked)
@@ -288,7 +303,7 @@ func (s *Store) SearchStage(ctx context.Context, p auth.Principal, collectionID,
 		}
 	case "final":
 		fused := retrieval.RRF(retrieval.DefaultRRFConstant, ftsOrder, denseOrder)
-		ordered = retrieval.Rerank(retrieval.Tokenize(query), fused, textByChunk)
+		ordered = s.rankFused(query, fused, textByChunk)
 	}
 
 	var out []protocol.SearchResult

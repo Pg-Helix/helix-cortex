@@ -109,6 +109,11 @@ func main() {
 			ChunkModelID:       modelID,
 			ChunkModelRevision: modelRevision,
 			ChunkDims:          dims,
+			// Default off (reranker stays on, unchanged behavior) --
+			// see Store.DisableRerank's doc comment for the measured
+			// evidence (helix-labs/eval/PROTOCOL.md Decision D) behind
+			// this opt-out.
+			DisableRerank: os.Getenv("CORTEX_DISABLE_RERANK") == "1",
 		},
 		Authenticator: authenticator,
 		Embedder:      embedder,
