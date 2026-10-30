@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"os"
 	"os/signal"
@@ -14,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Pg-Helix/helix-cortex/internal/embedconfig"
 	"github.com/Pg-Helix/helix-cortex/internal/ingest"
 	"github.com/Pg-Helix/helix-cortex/internal/worker"
 	"github.com/Pg-Helix/helix-infer/embed"
@@ -54,17 +56,23 @@ func main() {
 
 	modelKey := embed.RegistryKey(modelID, modelRevision)
 	targetModel := modelID + ":" + modelRevision
-	embedder, err := embed.NewEmbedder(reg, modelKey, embed.NewMock(dims), embed.Options{MaxConcurrency: 4})
+	provider, err := embedconfig.Build(dims)
+	if err != nil {
+		log.Fatalf("cortex: %v", err)
+	}
+	embedder, err := embed.NewEmbedder(reg, modelKey, provider, embed.Options{MaxConcurrency: 4})
 	if err != nil {
 		log.Fatalf("cortex: build embedder: %v", err)
 	}
 
+	embedTimeout := time.Duration(getenvInt("CORTEX_EMBED_TIMEOUT_SECONDS", leaseSeconds)) * time.Second
 	w := &worker.Worker{
 		Source:       &worker.DBSource{Pool: pool},
 		Embedder:     embedder,
 		TargetModel:  targetModel,
 		LeaseSeconds: leaseSeconds,
 		MaxAttempts:  maxAttempts,
+		EmbedTimeout: embedTimeout,
 	}
 	// CORTEX_INPUT_EXTRACTOR selects a versioned input-extraction
 	// strategy (ADR-0007): "raw" (default, unmodified from this
@@ -77,7 +85,20 @@ func main() {
 	switch extractor := getenv("CORTEX_INPUT_EXTRACTOR", "raw"); extractor {
 	case "raw":
 	case "chunk-text":
-		w.InputExtractor = ingest.ExtractChunkText
+		// The model's own required task-instruction prefix (e.g.
+		// nomic-embed-text's "search_document: ") is versioned
+		// preprocessing keyed by modelID -- embedconfig.DocumentPrefix,
+		// the same lookup cortex-api's query-side embedding uses for
+		// "search_query: " -- composed here, not a string ingest.Split
+		// or ExtractChunkText itself would need to know about.
+		docPrefix := embedconfig.DocumentPrefix(modelID)
+		w.InputExtractor = func(raw json.RawMessage) (string, error) {
+			text, err := ingest.ExtractChunkText(raw)
+			if err != nil {
+				return "", err
+			}
+			return docPrefix + text, nil
+		}
 	default:
 		log.Fatalf("cortex: unknown CORTEX_INPUT_EXTRACTOR %q (want \"raw\" or \"chunk-text\")", extractor)
 	}

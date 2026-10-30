@@ -109,6 +109,21 @@ func (s *Store) backfillDocument(ctx context.Context, tx pgx.Tx, sourceID int64,
 	return backfillChunks(ctx, tx, sourceID, keys)
 }
 
+// EnsureActiveSourceID resolves (registering if necessary) the current
+// active source_id for tenant, for callers outside an existing
+// transaction -- cmd/cortex-api's --backfill-tenant mode, which has no
+// HTTP request/collection context to derive one from.
+func (s *Store) EnsureActiveSourceID(ctx context.Context, tenant string) (int64, error) {
+	p := auth.Principal{Name: "backfill", Tenant: tenant}
+	var sourceID int64
+	err := s.withTenant(ctx, p, func(tx pgx.Tx) error {
+		var err error
+		sourceID, err = s.ensureSourceRegistered(ctx, tx)
+		return err
+	})
+	return sourceID, err
+}
+
 // BackfillTenant schedules up to one batch of backfill work for the
 // given tenant's chunks under sourceID and reports how many keys it
 // scheduled. Callers loop until it returns 0 to drain a full backlog

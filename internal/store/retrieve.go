@@ -132,7 +132,7 @@ func (s *Store) retrievalCandidates(ctx context.Context, p auth.Principal, colle
 		return 0, nil, nil, err
 	}
 
-	queryVec, err := embedQuery(ctx, embedder, targetModel, query)
+	queryVec, err := embedQuery(ctx, embedder, targetModel, s.ChunkModelID, query)
 	if err != nil {
 		return 0, nil, nil, err
 	}

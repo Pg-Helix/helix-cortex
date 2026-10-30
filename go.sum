@@ -1,5 +1,7 @@
 github.com/Pg-Helix/helix-infer v0.0.0-20261021182435-444d5213ccb9 h1:n3odpfmNbcjHWqc1pWtqqdCr5xFYd4GuQzvn9RvL8iw=
 github.com/Pg-Helix/helix-infer v0.0.0-20261021182435-444d5213ccb9/go.mod h1:9jP9LVIUUGxTQlb0a2BR6OZxE7XrlE2MitCNI1Kl/xw=
+github.com/Pg-Helix/helix-infer v0.0.0-20261030170302-b577bff4e6a3 h1:nsI76t6oBbxqnf9xwPJwdAfKP5mBzJSPGm4YPrYm1Nc=
+github.com/Pg-Helix/helix-infer v0.0.0-20261030170302-b577bff4e6a3/go.mod h1:9jP9LVIUUGxTQlb0a2BR6OZxE7XrlE2MitCNI1Kl/xw=
 github.com/Pg-Helix/helix-protocol v0.0.0-20261021182120-7235ca4611fb h1:OwLazpF0pz8LKsBMFoB600c9IKzZoDR4Iz/o3Ao74MM=
 github.com/Pg-Helix/helix-protocol v0.0.0-20261021182120-7235ca4611fb/go.mod h1:+DVWHl4ULOzDvX5bM5PubexqONkjf/qM/fQdfuLUqUI=
 github.com/Pg-Helix/helix-protocol v0.0.0-20261027082639-abdd123b19ea h1:FXUFC+votIY/mxSVCHfy12ew6IKg89upzYMpcV4S2S4=
