@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/Pg-Helix/helix-infer/embed"
 )
@@ -66,6 +67,14 @@ type Worker struct {
 	// -- a backward-compatible addition to this contract, not new
 	// behavior for any existing caller.
 	InputExtractor func(json.RawMessage) (string, error)
+
+	// EmbedTimeout bounds a single embed call -- with the mock provider
+	// this was moot (no network, effectively instant), but a real
+	// provider call has no deadline otherwise beyond this worker's
+	// entire process lifetime (RunOnce is called with the process's
+	// root context, cancelled only on shutdown). 0 disables the bound
+	// (ctx is used as-is), which previously was the ONLY behavior.
+	EmbedTimeout time.Duration
 }
 
 func (w *Worker) extractInput(raw json.RawMessage) (string, error) {
@@ -102,7 +111,13 @@ func (w *Worker) RunOnce(ctx context.Context) (handled bool, err error) {
 		return true, fmt.Errorf("worker: extract input for job %s: %w", job.JobID, err)
 	}
 
-	res, err := w.Embedder.Embed(ctx, embed.EmbedRequest{Model: job.TargetModel, Input: []string{text}})
+	embedCtx := ctx
+	if w.EmbedTimeout > 0 {
+		var cancel context.CancelFunc
+		embedCtx, cancel = context.WithTimeout(ctx, w.EmbedTimeout)
+		defer cancel()
+	}
+	res, err := w.Embedder.Embed(embedCtx, embed.EmbedRequest{Model: job.TargetModel, Input: []string{text}})
 	if err != nil {
 		// Deliberately does not call PublishResult: an inference failure
 		// (including a dimension mismatch Guarded itself caught) is not one
@@ -113,6 +128,15 @@ func (w *Worker) RunOnce(ctx context.Context) (handled bool, err error) {
 		return true, fmt.Errorf("worker: embed job %s: %w", job.JobID, err)
 	}
 
+	// Defensive even though the adapter's own boundary validation (see
+	// helix-infer/internal/providers) already guarantees len(Vectors) ==
+	// len(Input) == 1 whenever Embed returns no error: a worker that
+	// indexes Vectors[0] unconditionally would panic on any future
+	// provider whose validation has a gap, rather than failing this one
+	// job the way every other embed error above already does.
+	if len(res.Vectors) != 1 {
+		return true, fmt.Errorf("worker: embed job %s: provider returned %d vectors for 1 input", job.JobID, len(res.Vectors))
+	}
 	value, err := json.Marshal(res.Vectors[0])
 	if err != nil {
 		return true, fmt.Errorf("worker: marshal result for job %s: %w", job.JobID, err)

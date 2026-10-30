@@ -3,7 +3,7 @@ module github.com/Pg-Helix/helix-cortex
 go 1.26.4
 
 require (
-	github.com/Pg-Helix/helix-infer v0.0.0-20261021182435-444d5213ccb9
+	github.com/Pg-Helix/helix-infer v0.0.0-20261030170302-b577bff4e6a3
 	github.com/jackc/pgx/v5 v5.11.0
 )
 

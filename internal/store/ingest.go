@@ -42,29 +42,36 @@ func (s *Store) IngestDocument(ctx context.Context, p auth.Principal, collection
 			return err
 		}
 
-		var documentID string
-		var existingChunkerVersion *string
-		var existingVersionID *string
-		var existingDigest *string
-		err = tx.QueryRow(ctx, `
-			SELECT d.id, d.chunker_version, d.active_version_id, dv.digest
-			FROM cortex.document d
-			LEFT JOIN cortex.document_version dv ON dv.id = d.active_version_id
-			WHERE d.collection_id = $1 AND d.name = $2
-		`, collectionID, name).Scan(&documentID, &existingChunkerVersion, &existingVersionID, &existingDigest)
+		documentID, existingChunkerVersion, existingVersionID, existingDigest, isNew, err := s.resolveDocumentForIngest(ctx, tx, collectionID, p.Tenant, name, contentType)
+		if err != nil {
+			return err
+		}
 		switch {
-		case errors.Is(err, pgx.ErrNoRows):
-			documentID, err = s.createDocument(ctx, tx, collectionID, p.Tenant, name, contentType)
-			if err != nil {
+		case isNew, existingVersionID == nil:
+			// Nothing to compare against or supersede -- either a brand
+			// new document (isNew) or an existing document row with no
+			// active version yet (active_version_id IS NULL). Reproduced
+			// directly under the concurrent-ingest races below: a
+			// request can observe this state via resolveDocumentForIngest's
+			// FOR UPDATE read. Either way, fall through to create the
+			// (first) version below; existingVersionID/
+			// existingChunkerVersion/existingDigest are not safe to
+			// dereference here.
+		case existingDigest != nil && *existingDigest == digestHex && existingChunkerVersion != nil && *existingChunkerVersion == ingest.ChunkerVersion:
+			// Idempotent no-op for CONTENT: identical bytes under the same
+			// chunker version already active, so no row changes, no
+			// capture-trigger activity, no new job for that reason. But an
+			// unchanged document can still be missing embedding work under
+			// the CURRENTLY active binding (sourceID), e.g. right after a
+			// mock -> real binding cutover: unchanged bytes never touch
+			// cortex.chunk, so nothing re-fires the capture trigger under
+			// the new binding on their own. Bounded to this one document's
+			// chunks (not a tenant-wide scan) -- cheap, and resumable
+			// across repeated re-ingests if a batch limit is ever hit.
+			if err := s.backfillDocument(ctx, tx, sourceID, documentID); err != nil {
 				return err
 			}
-		case err != nil:
-			return fmt.Errorf("store: look up document: %w", err)
-		case existingDigest != nil && *existingDigest == digestHex && existingChunkerVersion != nil && *existingChunkerVersion == ingest.ChunkerVersion:
-			// Idempotent no-op: identical bytes under the same chunker
-			// version already active. No row changes, no capture-trigger
-			// activity, no new job -- exactly the invariant required.
-			out, err = s.fetchDocument(ctx, tx, documentID)
+			out, err = s.fetchDocument(ctx, tx, documentID, sourceID)
 			return err
 		default:
 			if err := s.supersedeDocument(ctx, tx, documentID, *existingVersionID, *existingChunkerVersion, *existingDigest); err != nil {
@@ -72,7 +79,6 @@ func (s *Store) IngestDocument(ctx context.Context, p auth.Principal, collection
 			}
 		}
 
-		_ = sourceID
 		versionID, err := s.createVersion(ctx, tx, documentID, p.Tenant, digestHex, len(content), len(chunks))
 		if err != nil {
 			return err
@@ -92,25 +98,82 @@ func (s *Store) IngestDocument(ctx context.Context, p auth.Principal, collection
 				return fmt.Errorf("store: insert chunk %d: %w", c.Index, err)
 			}
 		}
-		_ = sourceID // registration is the side effect that matters; kernel's own capture trigger (fired by the INSERTs above) does the enqueueing.
-
-		out, err = s.fetchDocument(ctx, tx, documentID)
+		// registration is the side effect that matters for a freshly
+		// (re)activated version; kernel's own capture trigger (fired by
+		// the INSERTs above) does the enqueueing under sourceID.
+		out, err = s.fetchDocument(ctx, tx, documentID, sourceID)
 		return err
 	})
 	return out, err
 }
 
-func (s *Store) createDocument(ctx context.Context, tx pgx.Tx, collectionID, tenant, name, contentType string) (string, error) {
-	var id string
-	err := tx.QueryRow(ctx, `
-		INSERT INTO cortex.document (collection_id, tenant, name, content_type, chunker_version)
-		VALUES ($1, $2, $3, $4, '')
-		RETURNING id
-	`, collectionID, tenant, name, contentType).Scan(&id)
-	if err != nil {
-		return "", fmt.Errorf("store: create document: %w", err)
+// resolveDocumentForIngest finds-or-creates the named document, safe
+// under concurrent ingests of the SAME name (first-creation races and
+// competing content updates both land here, since a re-POST to an
+// existing name is just an update per ADR-0007 decision 3's document
+// identity). FOR UPDATE on the existing-row path serializes concurrent
+// updaters against each other -- a second request blocks until the
+// first commits, then sees its result and proceeds correctly (an
+// idempotent no-op or a genuine supersede against the WINNER's content,
+// never racing past supersedeDocument's tombstoning of the other
+// version's chunks). The not-found path races INSERT...ON CONFLICT DO
+// NOTHING for first creation; Postgres itself serializes two concurrent
+// inserters of the same (collection_id, name) at the unique index, so
+// at most one iteration of this loop ever actually creates a row -- the
+// loser re-SELECTs FOR UPDATE and resumes as the normal existing-row
+// case instead of silently treating itself as "created".
+func (s *Store) resolveDocumentForIngest(ctx context.Context, tx pgx.Tx, collectionID, tenant, name, contentType string) (documentID string, existingChunkerVersion, existingVersionID, existingDigest *string, isNew bool, err error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		// Deliberately NOT a single statement joining document_version:
+		// when this SELECT blocks on FOR UPDATE and then resumes after
+		// the lock holder commits, only the LOCKED table's own row
+		// (document) is guaranteed to reflect that fresh commit --
+		// Postgres re-fetches the locked row's columns, but a JOINed,
+		// non-locked table in the SAME statement can still be evaluated
+		// against the statement's ORIGINAL (pre-wait) snapshot. That
+		// produced exactly this bug, reproduced live: active_version_id
+		// came back as the WINNER's freshly-committed version id, while
+		// the joined document_version.digest for that same id came back
+		// NULL, because the join itself was still looking at the
+		// pre-commit snapshot. Two separate statements -- lock+fetch
+		// document, THEN fetch its version by that now-confirmed id --
+		// gives the second query its own fresh snapshot with no such risk.
+		selErr := tx.QueryRow(ctx, `
+			SELECT d.id, d.chunker_version, d.active_version_id
+			FROM cortex.document d
+			WHERE d.collection_id = $1 AND d.name = $2
+			FOR UPDATE OF d
+		`, collectionID, name).Scan(&documentID, &existingChunkerVersion, &existingVersionID)
+		if selErr == nil {
+			if existingVersionID != nil {
+				if digErr := tx.QueryRow(ctx, `SELECT digest FROM cortex.document_version WHERE id = $1`, *existingVersionID).Scan(&existingDigest); digErr != nil && !errors.Is(digErr, pgx.ErrNoRows) {
+					return "", nil, nil, nil, false, fmt.Errorf("store: look up active version: %w", digErr)
+				}
+			}
+			return documentID, existingChunkerVersion, existingVersionID, existingDigest, false, nil
+		}
+		if !errors.Is(selErr, pgx.ErrNoRows) {
+			return "", nil, nil, nil, false, fmt.Errorf("store: look up document: %w", selErr)
+		}
+
+		var id string
+		insErr := tx.QueryRow(ctx, `
+			INSERT INTO cortex.document (collection_id, tenant, name, content_type, chunker_version)
+			VALUES ($1, $2, $3, $4, '')
+			ON CONFLICT (collection_id, name) DO NOTHING
+			RETURNING id
+		`, collectionID, tenant, name, contentType).Scan(&id)
+		if insErr == nil {
+			return id, nil, nil, nil, true, nil
+		}
+		if !errors.Is(insErr, pgx.ErrNoRows) {
+			return "", nil, nil, nil, false, fmt.Errorf("store: create document: %w", insErr)
+		}
+		// Lost the race to a concurrent first creation: loop back and
+		// re-SELECT ... FOR UPDATE, which now finds (and locks) the
+		// winner's committed row.
 	}
-	return id, nil
+	return "", nil, nil, nil, false, fmt.Errorf("store: could not resolve document %q in collection %q after retrying the creation race", name, collectionID)
 }
 
 func (s *Store) createVersion(ctx context.Context, tx pgx.Tx, documentID, tenant, digest string, byteSize, chunkCount int) (string, error) {
@@ -171,8 +234,11 @@ func (s *Store) GetDocument(ctx context.Context, p auth.Principal, collectionID,
 		if err := requireRole(ctx, tx, collectionID, p, "owner", "reader"); err != nil {
 			return err
 		}
-		var err error
-		out, err = s.fetchDocument(ctx, tx, documentID)
+		sourceID, err := s.ensureSourceRegistered(ctx, tx)
+		if err != nil {
+			return err
+		}
+		out, err = s.fetchDocument(ctx, tx, documentID, sourceID)
 		return err
 	})
 	return out, err
@@ -182,8 +248,13 @@ func (s *Store) GetDocument(ctx context.Context, p auth.Principal, collectionID,
 // readiness, joining into helix_ai.derived_value using the same ->>
 // extraction convention get_job_input/request_refresh use kernel-side
 // (never hand-reconstructing the jsonb source_key, which risks drifting
-// from however _row_key_jsonb actually serializes it).
-func (s *Store) fetchDocument(ctx context.Context, tx pgx.Tx, documentID string) (protocol.Document, error) {
+// from however _row_key_jsonb actually serializes it). sourceID scopes
+// the readiness join to the CURRENTLY active embedding binding: without
+// it, a document with sidecars under more than one binding (e.g. mid
+// mock -> real cutover) double-counts "total" and can report Ready from
+// an old binding's already-published value while the active binding's
+// own chunks are still pending.
+func (s *Store) fetchDocument(ctx context.Context, tx pgx.Tx, documentID string, sourceID int64) (protocol.Document, error) {
 	var out protocol.Document
 	var activeVersionID *string
 	err := tx.QueryRow(ctx, `
@@ -217,8 +288,8 @@ func (s *Store) fetchDocument(ctx context.Context, tx pgx.Tx, documentID string)
 		 AND (dv.source_key ->> 'content_digest') = c.content_digest
 		 AND (dv.source_key ->> 'chunker_version') = c.chunker_version
 		 AND (dv.source_key ->> 'chunk_index') = c.chunk_index::text
-		WHERE c.document_id = $1 AND c.content_digest = $2 AND c.chunker_version = $3
-	`, documentID, out.Digest, out.ChunkerVersion).Scan(&ready, &total)
+		WHERE c.document_id = $1 AND c.content_digest = $2 AND c.chunker_version = $3 AND dv.source_id = $4
+	`, documentID, out.Digest, out.ChunkerVersion, sourceID).Scan(&ready, &total)
 	if err != nil {
 		return out, fmt.Errorf("store: aggregate chunk status: %w", err)
 	}

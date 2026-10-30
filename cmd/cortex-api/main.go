@@ -20,6 +20,7 @@ import (
 
 	"github.com/Pg-Helix/helix-cortex/internal/api"
 	"github.com/Pg-Helix/helix-cortex/internal/auth"
+	"github.com/Pg-Helix/helix-cortex/internal/embedconfig"
 	"github.com/Pg-Helix/helix-cortex/internal/store"
 	"github.com/Pg-Helix/helix-cortex/internal/testhooks"
 	"github.com/Pg-Helix/helix-infer/embed"
@@ -59,9 +60,41 @@ func main() {
 	if err := reg.Register(protocol.Model{Id: modelID, Revision: modelRevision, Capability: protocol.Embed, Dims: &dims}); err != nil {
 		log.Fatalf("cortex-api: register model: %v", err)
 	}
-	embedder, err := embed.NewEmbedder(reg, embed.RegistryKey(modelID, modelRevision), embed.NewMock(dims), embed.Options{MaxConcurrency: 4})
+	provider, err := embedconfig.Build(dims)
+	if err != nil {
+		log.Fatalf("cortex-api: %v", err)
+	}
+	embedder, err := embed.NewEmbedder(reg, embed.RegistryKey(modelID, modelRevision), provider, embed.Options{MaxConcurrency: 4})
 	if err != nil {
 		log.Fatalf("cortex-api: build embedder: %v", err)
+	}
+
+	// --backfill-tenant mode: an explicit, administrator-invoked, run-
+	// once-and-exit operation for a binding cutover's backlog (e.g.
+	// mock -> real) -- never wired into a request's hot path, so this
+	// scan's cost is never paid by ordinary search/answer/ingest
+	// traffic. Loops in bounded batches (store.BackfillTenant) until a
+	// pass schedules nothing; safe to stop and re-run at any point.
+	if tenant := os.Getenv("CORTEX_BACKFILL_TENANT"); tenant != "" {
+		st := &store.Store{Pool: pool, ChunkModelID: modelID, ChunkModelRevision: modelRevision, ChunkDims: dims}
+		sourceID, err := st.EnsureActiveSourceID(ctx, tenant)
+		if err != nil {
+			log.Fatalf("cortex-api: backfill: resolve active source for tenant %q: %v", tenant, err)
+		}
+		total := 0
+		for {
+			scheduled, err := st.BackfillTenant(ctx, tenant, sourceID)
+			if err != nil {
+				log.Fatalf("cortex-api: backfill: %v", err)
+			}
+			total += scheduled
+			if scheduled == 0 {
+				break
+			}
+			log.Printf("cortex-api: backfill: scheduled %d chunk(s) for tenant %q under source_id=%d (running total %d)", scheduled, tenant, sourceID, total)
+		}
+		log.Printf("cortex-api: backfill: done -- %d chunk(s) scheduled for tenant %q under source_id=%d", total, tenant, sourceID)
+		return
 	}
 
 	var hooks *testhooks.Registry
@@ -76,6 +109,11 @@ func main() {
 			ChunkModelID:       modelID,
 			ChunkModelRevision: modelRevision,
 			ChunkDims:          dims,
+			// Default off (reranker stays on, unchanged behavior) --
+			// see Store.DisableRerank's doc comment for the measured
+			// evidence (helix-labs/eval/PROTOCOL.md Decision D) behind
+			// this opt-out.
+			DisableRerank: os.Getenv("CORTEX_DISABLE_RERANK") == "1",
 		},
 		Authenticator: authenticator,
 		Embedder:      embedder,
