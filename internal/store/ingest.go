@@ -47,9 +47,16 @@ func (s *Store) IngestDocument(ctx context.Context, p auth.Principal, collection
 			return err
 		}
 		switch {
-		case isNew:
-			// Nothing to compare against or supersede -- fall through to
-			// create the first version below.
+		case isNew, existingVersionID == nil:
+			// Nothing to compare against or supersede -- either a brand
+			// new document (isNew) or an existing document row with no
+			// active version yet (active_version_id IS NULL). Reproduced
+			// directly under the concurrent-ingest races below: a
+			// request can observe this state via resolveDocumentForIngest's
+			// FOR UPDATE read. Either way, fall through to create the
+			// (first) version below; existingVersionID/
+			// existingChunkerVersion/existingDigest are not safe to
+			// dereference here.
 		case existingDigest != nil && *existingDigest == digestHex && existingChunkerVersion != nil && *existingChunkerVersion == ingest.ChunkerVersion:
 			// Idempotent no-op for CONTENT: identical bytes under the same
 			// chunker version already active, so no row changes, no
@@ -117,14 +124,32 @@ func (s *Store) IngestDocument(ctx context.Context, p auth.Principal, collection
 // case instead of silently treating itself as "created".
 func (s *Store) resolveDocumentForIngest(ctx context.Context, tx pgx.Tx, collectionID, tenant, name, contentType string) (documentID string, existingChunkerVersion, existingVersionID, existingDigest *string, isNew bool, err error) {
 	for attempt := 0; attempt < 2; attempt++ {
+		// Deliberately NOT a single statement joining document_version:
+		// when this SELECT blocks on FOR UPDATE and then resumes after
+		// the lock holder commits, only the LOCKED table's own row
+		// (document) is guaranteed to reflect that fresh commit --
+		// Postgres re-fetches the locked row's columns, but a JOINed,
+		// non-locked table in the SAME statement can still be evaluated
+		// against the statement's ORIGINAL (pre-wait) snapshot. That
+		// produced exactly this bug, reproduced live: active_version_id
+		// came back as the WINNER's freshly-committed version id, while
+		// the joined document_version.digest for that same id came back
+		// NULL, because the join itself was still looking at the
+		// pre-commit snapshot. Two separate statements -- lock+fetch
+		// document, THEN fetch its version by that now-confirmed id --
+		// gives the second query its own fresh snapshot with no such risk.
 		selErr := tx.QueryRow(ctx, `
-			SELECT d.id, d.chunker_version, d.active_version_id, dv.digest
+			SELECT d.id, d.chunker_version, d.active_version_id
 			FROM cortex.document d
-			LEFT JOIN cortex.document_version dv ON dv.id = d.active_version_id
 			WHERE d.collection_id = $1 AND d.name = $2
 			FOR UPDATE OF d
-		`, collectionID, name).Scan(&documentID, &existingChunkerVersion, &existingVersionID, &existingDigest)
+		`, collectionID, name).Scan(&documentID, &existingChunkerVersion, &existingVersionID)
 		if selErr == nil {
+			if existingVersionID != nil {
+				if digErr := tx.QueryRow(ctx, `SELECT digest FROM cortex.document_version WHERE id = $1`, *existingVersionID).Scan(&existingDigest); digErr != nil && !errors.Is(digErr, pgx.ErrNoRows) {
+					return "", nil, nil, nil, false, fmt.Errorf("store: look up active version: %w", digErr)
+				}
+			}
 			return documentID, existingChunkerVersion, existingVersionID, existingDigest, false, nil
 		}
 		if !errors.Is(selErr, pgx.ErrNoRows) {
