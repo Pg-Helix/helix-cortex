@@ -63,51 +63,63 @@ const (
 // candidateQuery runs both FTS and dense queries, each independently
 // ACL- and active-version-filtered inside the query itself (see the SQL
 // above), before any ranking or LIMIT -- never a global top-k filtered
-// down afterward.
+// down afterward. A thin wrapper over the two single-method halves
+// below, which the evaluation instrumentation (SearchStage) also calls
+// independently -- never a second, separately-maintained implementation
+// of either query.
 func (s *Store) candidateQuery(ctx context.Context, tx pgx.Tx, collectionID string, sourceID int64, query string, queryVec []float32) (ftsOrder []string, denseOrder []string, textByChunk map[string]string, err error) {
 	textByChunk = make(map[string]string)
-
-	tsq := toTSQuery(query)
-	if tsq != "" {
-		rows, qerr := tx.Query(ctx, ftsCandidateSQL, collectionID, sourceID, tsq, candidateLimit)
-		if qerr != nil {
-			return nil, nil, nil, fmt.Errorf("store: fts candidates: %w", qerr)
-		}
-		for rows.Next() {
-			var id, text string
-			if serr := rows.Scan(&id, &text); serr != nil {
-				rows.Close()
-				return nil, nil, nil, fmt.Errorf("store: scan fts candidate: %w", serr)
-			}
-			ftsOrder = append(ftsOrder, id)
-			textByChunk[id] = text
-		}
-		if cerr := rows.Err(); cerr != nil {
-			rows.Close()
-			return nil, nil, nil, cerr
-		}
-		rows.Close()
+	ftsOrder, err = ftsCandidates(ctx, tx, collectionID, sourceID, query, textByChunk)
+	if err != nil {
+		return nil, nil, nil, err
 	}
+	denseOrder, err = denseCandidates(ctx, tx, collectionID, sourceID, queryVec, textByChunk)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return ftsOrder, denseOrder, textByChunk, nil
+}
 
+func ftsCandidates(ctx context.Context, tx pgx.Tx, collectionID string, sourceID int64, query string, textByChunk map[string]string) ([]string, error) {
+	tsq := toTSQuery(query)
+	if tsq == "" {
+		return nil, nil
+	}
+	rows, qerr := tx.Query(ctx, ftsCandidateSQL, collectionID, sourceID, tsq, candidateLimit)
+	if qerr != nil {
+		return nil, fmt.Errorf("store: fts candidates: %w", qerr)
+	}
+	defer rows.Close()
+	var order []string
+	for rows.Next() {
+		var id, text string
+		if serr := rows.Scan(&id, &text); serr != nil {
+			return nil, fmt.Errorf("store: scan fts candidate: %w", serr)
+		}
+		order = append(order, id)
+		textByChunk[id] = text
+	}
+	return order, rows.Err()
+}
+
+func denseCandidates(ctx context.Context, tx pgx.Tx, collectionID string, sourceID int64, queryVec []float32, textByChunk map[string]string) ([]string, error) {
 	vecLiteral := vectorLiteral(queryVec)
 	rows, qerr := tx.Query(ctx, denseCandidateSQL, collectionID, sourceID, vecLiteral, candidateLimit)
 	if qerr != nil {
-		return nil, nil, nil, fmt.Errorf("store: dense candidates: %w", qerr)
+		return nil, fmt.Errorf("store: dense candidates: %w", qerr)
 	}
 	defer rows.Close()
+	var order []string
 	for rows.Next() {
 		var id, text string
 		var distance float64
 		if serr := rows.Scan(&id, &text, &distance); serr != nil {
-			return nil, nil, nil, fmt.Errorf("store: scan dense candidate: %w", serr)
+			return nil, fmt.Errorf("store: scan dense candidate: %w", serr)
 		}
-		denseOrder = append(denseOrder, id)
+		order = append(order, id)
 		textByChunk[id] = text
 	}
-	if cerr := rows.Err(); cerr != nil {
-		return nil, nil, nil, cerr
-	}
-	return ftsOrder, denseOrder, textByChunk, nil
+	return order, rows.Err()
 }
 
 // retrievalCandidates runs the shared prefix of Search and Answer: a
@@ -197,6 +209,112 @@ func (s *Store) Search(ctx context.Context, p auth.Principal, collectionID, quer
 				Score:      r.OverlapScore*1e6 + r.FusedScore, // see retrieval.Rerank's own sort key; exposed as one number for the API
 				Snippet:    &snippet,
 			})
+		}
+		return nil
+	})
+	return out, err
+}
+
+// SearchStage is test-only evaluation instrumentation (helix-labs/eval),
+// never reachable unless the caller is gated the same way the in-flight-
+// revocation barrier is (CORTEX_TEST_HOOKS=1 -- see internal/api). It
+// returns ONE intermediate stage of hybrid retrieval instead of the
+// final served ranking, by calling the SAME ftsCandidates/
+// denseCandidates/retrieval.RRF/retrieval.Rerank Search and Answer use
+// -- never a second, separately-maintained implementation that could
+// silently drift from what callers actually receive. stage is one of
+// "fts-only", "dense-only", "hybrid-prererank", "final".
+func (s *Store) SearchStage(ctx context.Context, p auth.Principal, collectionID, query string, topK int, embedder *embed.Guarded, targetModel, stage string) ([]protocol.SearchResult, error) {
+	var sourceID int64
+	err := s.withTenant(ctx, p, func(tx pgx.Tx) error {
+		if err := requireRole(ctx, tx, collectionID, p, "owner", "reader"); err != nil {
+			return err
+		}
+		var rerr error
+		sourceID, rerr = s.ensureSourceRegistered(ctx, tx)
+		return rerr
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var queryVec []float32
+	if stage != "fts-only" {
+		queryVec, err = embedQuery(ctx, embedder, targetModel, s.ChunkModelID, query)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	textByChunk := make(map[string]string)
+	var ftsOrder, denseOrder []string
+	err = s.withTenant(ctx, p, func(tx pgx.Tx) error {
+		if err := requireRole(ctx, tx, collectionID, p, "owner", "reader"); err != nil {
+			return err
+		}
+		var rerr error
+		switch stage {
+		case "fts-only":
+			ftsOrder, rerr = ftsCandidates(ctx, tx, collectionID, sourceID, query, textByChunk)
+		case "dense-only":
+			denseOrder, rerr = denseCandidates(ctx, tx, collectionID, sourceID, queryVec, textByChunk)
+		case "hybrid-prererank", "final":
+			ftsOrder, rerr = ftsCandidates(ctx, tx, collectionID, sourceID, query, textByChunk)
+			if rerr == nil {
+				denseOrder, rerr = denseCandidates(ctx, tx, collectionID, sourceID, queryVec, textByChunk)
+			}
+		default:
+			return fmt.Errorf("store: unknown eval stage %q", stage)
+		}
+		return rerr
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var ordered []retrieval.RerankedChunk
+	switch stage {
+	case "fts-only":
+		for _, id := range ftsOrder {
+			ordered = append(ordered, retrieval.RerankedChunk{ChunkID: id})
+		}
+	case "dense-only":
+		for _, id := range denseOrder {
+			ordered = append(ordered, retrieval.RerankedChunk{ChunkID: id})
+		}
+	case "hybrid-prererank":
+		for _, f := range retrieval.RRF(retrieval.DefaultRRFConstant, ftsOrder, denseOrder) {
+			ordered = append(ordered, retrieval.RerankedChunk{ChunkID: f.ChunkID, FusedScore: f.Score})
+		}
+	case "final":
+		fused := retrieval.RRF(retrieval.DefaultRRFConstant, ftsOrder, denseOrder)
+		ordered = retrieval.Rerank(retrieval.Tokenize(query), fused, textByChunk)
+	}
+
+	var out []protocol.SearchResult
+	err = s.withTenant(ctx, p, func(tx pgx.Tx) error {
+		if err := requireRole(ctx, tx, collectionID, p, "owner", "reader"); err != nil {
+			return err
+		}
+		for i, r := range ordered {
+			if len(out) >= topK {
+				break
+			}
+			if i >= candidateLimit {
+				break
+			}
+			chunk, ok, rerr := s.reauthorizeChunk(ctx, tx, collectionID, sourceID, r.ChunkID)
+			if rerr != nil {
+				return rerr
+			}
+			if !ok {
+				continue
+			}
+			snippet := chunk.text
+			if len(snippet) > 200 {
+				snippet = snippet[:200]
+			}
+			out = append(out, protocol.SearchResult{ChunkId: r.ChunkID, DocumentId: chunk.documentID, Snippet: &snippet})
 		}
 		return nil
 	})
