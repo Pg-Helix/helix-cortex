@@ -81,6 +81,31 @@ func DocumentPrefix(modelID string) string {
 	}
 }
 
+// AnswerMinSimilarity returns the calibrated minimum query/passage
+// cosine similarity at which a passage supports an answer
+// (store.Store.AnswerMinSimilarity, helix-atlas ADR-0008), for one
+// exact embedding model id + revision. Similarity scales differ per
+// model and per task-prefix convention, so a value is only meaningful
+// for the binding it was measured on; ok=false means no calibrated
+// value exists.
+//
+// nomic-embed-text v1.5 (768 dims, cosine, with the "search_query: " /
+// "search_document: " prefixes above): 0.707, selected on the
+// helix-labs/eval development rows only (v1 dev split +
+// answerability.jsonl "dev" set, n=27) by maximizing correct
+// answer/decline outcomes and taking the midpoint of the widest gap.
+// Measured with the pinned Ollama image: directly answering passages
+// score 0.71-0.87, unrelated questions' best passage 0.53-0.62, and
+// questions on a covered topic missing a decisive qualifier 0.68-0.70
+// -- so the margin against those is about 0.006 and this rule does not
+// reliably catch them (see the ADR's known limits).
+func AnswerMinSimilarity(modelID, revision string) (float64, bool) {
+	if modelID == "nomic-embed-text" && revision == "v1.5" {
+		return 0.707, true
+	}
+	return 0, false
+}
+
 func getenv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v

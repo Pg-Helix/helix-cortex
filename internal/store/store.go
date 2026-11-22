@@ -50,6 +50,15 @@ type Store struct {
 	// overlap first actively fights a real embedding's whole point on
 	// exactly the queries real embeddings are supposed to help.
 	DisableRerank bool
+
+	// AnswerMinSimilarity is Answer's evidence threshold: the minimum
+	// query/passage cosine similarity for a passage to support an answer
+	// (supportsAnswer). It is calibrated per embedding model --
+	// embedconfig.AnswerMinSimilarity -- because similarity scales are
+	// model-specific. nil disables the rule; cmd/cortex-api allows that
+	// only for the mock provider and refuses to start a real provider
+	// whose model has no calibrated value.
+	AnswerMinSimilarity *float64
 }
 
 func (s *Store) targetModel() string {

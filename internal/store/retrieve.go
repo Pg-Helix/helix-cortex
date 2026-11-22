@@ -67,17 +67,18 @@ const (
 // below, which the evaluation instrumentation (SearchStage) also calls
 // independently -- never a second, separately-maintained implementation
 // of either query.
-func (s *Store) candidateQuery(ctx context.Context, tx pgx.Tx, collectionID string, sourceID int64, query string, queryVec []float32) (ftsOrder []string, denseOrder []string, textByChunk map[string]string, err error) {
+func (s *Store) candidateQuery(ctx context.Context, tx pgx.Tx, collectionID string, sourceID int64, query string, queryVec []float32) (ftsOrder []string, denseOrder []string, textByChunk map[string]string, simByChunk map[string]float64, err error) {
 	textByChunk = make(map[string]string)
+	simByChunk = make(map[string]float64)
 	ftsOrder, err = ftsCandidates(ctx, tx, collectionID, sourceID, query, textByChunk)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	denseOrder, err = denseCandidates(ctx, tx, collectionID, sourceID, queryVec, textByChunk)
+	denseOrder, err = denseCandidates(ctx, tx, collectionID, sourceID, queryVec, textByChunk, simByChunk)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	return ftsOrder, denseOrder, textByChunk, nil
+	return ftsOrder, denseOrder, textByChunk, simByChunk, nil
 }
 
 func ftsCandidates(ctx context.Context, tx pgx.Tx, collectionID string, sourceID int64, query string, textByChunk map[string]string) ([]string, error) {
@@ -102,7 +103,11 @@ func ftsCandidates(ctx context.Context, tx pgx.Tx, collectionID string, sourceID
 	return order, rows.Err()
 }
 
-func denseCandidates(ctx context.Context, tx pgx.Tx, collectionID string, sourceID int64, queryVec []float32, textByChunk map[string]string) ([]string, error) {
+// denseCandidates also records each candidate's cosine similarity
+// (1 - pgvector's <=> cosine distance) in simByChunk when it is non-nil
+// -- the signal Answer's evidence rule (supportsAnswer) reads. Search
+// and SearchStage pass nil: their ranking never uses it.
+func denseCandidates(ctx context.Context, tx pgx.Tx, collectionID string, sourceID int64, queryVec []float32, textByChunk map[string]string, simByChunk map[string]float64) ([]string, error) {
 	vecLiteral := vectorLiteral(queryVec)
 	rows, qerr := tx.Query(ctx, denseCandidateSQL, collectionID, sourceID, vecLiteral, candidateLimit)
 	if qerr != nil {
@@ -118,6 +123,9 @@ func denseCandidates(ctx context.Context, tx pgx.Tx, collectionID string, source
 		}
 		order = append(order, id)
 		textByChunk[id] = text
+		if simByChunk != nil {
+			simByChunk[id] = 1 - distance
+		}
 	}
 	return order, rows.Err()
 }
@@ -131,7 +139,7 @@ func denseCandidates(ctx context.Context, tx pgx.Tx, collectionID string, source
 // passed during the network call). The ACL/active-version enforcement
 // candidateQuery's own SQL performs is what makes this fresh re-check
 // matter: it is not just a courtesy error-shape check.
-func (s *Store) retrievalCandidates(ctx context.Context, p auth.Principal, collectionID, query string, embedder *embed.Guarded, targetModel string) (sourceID int64, reranked []retrieval.RerankedChunk, textByChunk map[string]string, err error) {
+func (s *Store) retrievalCandidates(ctx context.Context, p auth.Principal, collectionID, query string, embedder *embed.Guarded, targetModel string) (sourceID int64, reranked []retrieval.RerankedChunk, simByChunk map[string]float64, err error) {
 	err = s.withTenant(ctx, p, func(tx pgx.Tx) error {
 		if err := requireRole(ctx, tx, collectionID, p, "owner", "reader"); err != nil {
 			return err
@@ -150,12 +158,13 @@ func (s *Store) retrievalCandidates(ctx context.Context, p auth.Principal, colle
 	}
 
 	var ftsOrder, denseOrder []string
+	var textByChunk map[string]string
 	err = s.withTenant(ctx, p, func(tx pgx.Tx) error {
 		if err := requireRole(ctx, tx, collectionID, p, "owner", "reader"); err != nil {
 			return err
 		}
 		var qerr error
-		ftsOrder, denseOrder, textByChunk, qerr = s.candidateQuery(ctx, tx, collectionID, sourceID, query, queryVec)
+		ftsOrder, denseOrder, textByChunk, simByChunk, qerr = s.candidateQuery(ctx, tx, collectionID, sourceID, query, queryVec)
 		return qerr
 	})
 	if err != nil {
@@ -164,7 +173,7 @@ func (s *Store) retrievalCandidates(ctx context.Context, p auth.Principal, colle
 
 	fused := retrieval.RRF(retrieval.DefaultRRFConstant, ftsOrder, denseOrder)
 	reranked = s.rankFused(query, fused, textByChunk)
-	return sourceID, reranked, textByChunk, nil
+	return sourceID, reranked, simByChunk, nil
 }
 
 // rankFused applies the deterministic lexical-overlap reranker to
@@ -272,11 +281,11 @@ func (s *Store) SearchStage(ctx context.Context, p auth.Principal, collectionID,
 		case "fts-only":
 			ftsOrder, rerr = ftsCandidates(ctx, tx, collectionID, sourceID, query, textByChunk)
 		case "dense-only":
-			denseOrder, rerr = denseCandidates(ctx, tx, collectionID, sourceID, queryVec, textByChunk)
+			denseOrder, rerr = denseCandidates(ctx, tx, collectionID, sourceID, queryVec, textByChunk, nil)
 		case "hybrid-prererank", "final":
 			ftsOrder, rerr = ftsCandidates(ctx, tx, collectionID, sourceID, query, textByChunk)
 			if rerr == nil {
-				denseOrder, rerr = denseCandidates(ctx, tx, collectionID, sourceID, queryVec, textByChunk)
+				denseOrder, rerr = denseCandidates(ctx, tx, collectionID, sourceID, queryVec, textByChunk, nil)
 			}
 		default:
 			return fmt.Errorf("store: unknown eval stage %q", stage)
@@ -346,7 +355,7 @@ func (s *Store) SearchStage(ctx context.Context, p auth.Principal, collectionID,
 // called exactly at that boundary -- the deterministic rendezvous point
 // the in-flight-revocation acceptance test pauses on, never a sleep.
 func (s *Store) Answer(ctx context.Context, p auth.Principal, collectionID, query string, embedder *embed.Guarded, targetModel string, barrierPause func()) (protocol.AnswerResponse, error) {
-	sourceID, reranked, _, err := s.retrievalCandidates(ctx, p, collectionID, query, embedder, targetModel)
+	sourceID, reranked, simByChunk, err := s.retrievalCandidates(ctx, p, collectionID, query, embedder, targetModel)
 	if err != nil {
 		return protocol.AnswerResponse{}, err
 	}
@@ -361,7 +370,7 @@ func (s *Store) Answer(ctx context.Context, p auth.Principal, collectionID, quer
 	}
 
 	var passages []retrieval.Passage
-	var citations []protocol.Citation
+	citationByChunk := make(map[string]protocol.Citation)
 	err = s.withTenant(ctx, p, func(tx pgx.Tx) error {
 		// Re-check the caller's own grant too: a reader whose access was
 		// revoked between candidate selection and now must not get a
@@ -376,6 +385,13 @@ func (s *Store) Answer(ctx context.Context, p auth.Principal, collectionID, quer
 			if i >= candidateLimit {
 				break
 			}
+			// Both conditions must hold for a passage to be used: it
+			// supports answering (evidence rule; checked first only
+			// because it needs no query) AND it is still current and
+			// authorized right now (reauthorizeChunk).
+			if !s.supportsAnswer(simByChunk, r.ChunkID) {
+				continue
+			}
 			chunk, ok, err := s.reauthorizeChunk(ctx, tx, collectionID, sourceID, r.ChunkID)
 			if err != nil {
 				return err
@@ -384,7 +400,7 @@ func (s *Store) Answer(ctx context.Context, p auth.Principal, collectionID, quer
 				continue // revoked, superseded, deleted, or no longer ready -- silently excluded, not an error
 			}
 			passages = append(passages, retrieval.Passage{ChunkID: r.ChunkID, Text: chunk.text})
-			citations = append(citations, protocol.Citation{ChunkId: r.ChunkID, SourceId: chunk.documentID, SourceDigest: chunk.digest})
+			citationByChunk[r.ChunkID] = protocol.Citation{ChunkId: r.ChunkID, SourceId: chunk.documentID, SourceDigest: chunk.digest}
 		}
 		return nil
 	})
@@ -392,18 +408,39 @@ func (s *Store) Answer(ctx context.Context, p auth.Principal, collectionID, quer
 		return protocol.AnswerResponse{}, err
 	}
 
+	return buildAnswerResponse(passages, citationByChunk), nil
+}
+
+// supportsAnswer is Answer's evidence rule (helix-atlas ADR-0008): a
+// passage supports answering iff the cosine similarity between the
+// query embedding and that chunk's stored embedding, under the active
+// binding, is at least s.AnswerMinSimilarity. Rank position and RRF
+// score never establish support -- only this per-passage similarity
+// does. A candidate with no dense similarity (FTS-only, outside the
+// dense top candidateLimit) has no measured support and is not used.
+// nil AnswerMinSimilarity disables the rule: only the mock provider,
+// whose hash vectors carry no semantic signal, runs that way (see
+// cmd/cortex-api and embedconfig.AnswerMinSimilarity).
+func (s *Store) supportsAnswer(simByChunk map[string]float64, chunkID string) bool {
+	if s.AnswerMinSimilarity == nil {
+		return true
+	}
+	sim, ok := simByChunk[chunkID]
+	return ok && sim >= *s.AnswerMinSimilarity
+}
+
+// buildAnswerResponse assembles the extractive answer from passages
+// (already supported, reauthorized, in rank order) and cites exactly the
+// passages the answer text used. No passage -> the documented decline:
+// {"answer":"","answer_method":"extractive","citations":[]} -- citations
+// is always a non-nil slice, so it serializes as [] and never null.
+func buildAnswerResponse(passages []retrieval.Passage, citationByChunk map[string]protocol.Citation) protocol.AnswerResponse {
 	answerText, used := retrieval.AssembleExtractiveAnswer(passages)
-	usedIDs := make(map[string]bool, len(used))
+	citations := make([]protocol.Citation, 0, len(used))
 	for _, u := range used {
-		usedIDs[u.ChunkID] = true
+		citations = append(citations, citationByChunk[u.ChunkID])
 	}
-	var finalCitations []protocol.Citation
-	for _, c := range citations {
-		if usedIDs[c.ChunkId] {
-			finalCitations = append(finalCitations, c)
-		}
-	}
-	return protocol.AnswerResponse{Answer: answerText, AnswerMethod: protocol.Extractive, Citations: finalCitations}, nil
+	return protocol.AnswerResponse{Answer: answerText, AnswerMethod: protocol.Extractive, Citations: citations}
 }
 
 type reauthorizedChunk struct {

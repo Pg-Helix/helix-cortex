@@ -97,6 +97,21 @@ func main() {
 		return
 	}
 
+	// Answer's evidence rule needs a similarity threshold calibrated for
+	// this exact model binding. A real provider without one must not
+	// start: it would either answer from any ranked passage or decline
+	// everything, both silently. Only mock embeddings, which have no
+	// semantic signal to threshold, run without the rule.
+	var answerMinSimilarity *float64
+	if t, ok := embedconfig.AnswerMinSimilarity(modelID, modelRevision); ok {
+		answerMinSimilarity = &t
+		log.Printf("cortex-api: /answers evidence rule: passage cosine similarity >= %.3f (%s:%s)", t, modelID, modelRevision)
+	} else if getenv("CORTEX_EMBED_PROVIDER", "mock") == "mock" {
+		log.Print("cortex-api: mock embeddings -- /answers evidence rule disabled (hash vectors carry no similarity signal)")
+	} else {
+		log.Fatalf("cortex-api: no calibrated /answers similarity threshold for model %s:%s (embedconfig.AnswerMinSimilarity)", modelID, modelRevision)
+	}
+
 	var hooks *testhooks.Registry
 	if os.Getenv("CORTEX_TEST_HOOKS") == "1" {
 		hooks = testhooks.NewRegistry()
@@ -113,7 +128,8 @@ func main() {
 			// see Store.DisableRerank's doc comment for the measured
 			// evidence (helix-labs/eval/PROTOCOL.md Decision D) behind
 			// this opt-out.
-			DisableRerank: os.Getenv("CORTEX_DISABLE_RERANK") == "1",
+			DisableRerank:       os.Getenv("CORTEX_DISABLE_RERANK") == "1",
+			AnswerMinSimilarity: answerMinSimilarity,
 		},
 		Authenticator: authenticator,
 		Embedder:      embedder,

@@ -90,3 +90,16 @@ func TestPrefixes(t *testing.T) {
 		t.Fatalf("mock model should have no prefix, got %q", got)
 	}
 }
+
+func TestAnswerMinSimilarity_OnlyForTheCalibratedBinding(t *testing.T) {
+	if got, ok := AnswerMinSimilarity("nomic-embed-text", "v1.5"); !ok || got != 0.707 {
+		t.Fatalf("nomic-embed-text v1.5: got (%v, %v), want (0.707, true)", got, ok)
+	}
+	// A threshold is a property of one model's similarity scale: another
+	// revision, another model, or the mock has none.
+	for _, c := range [][2]string{{"nomic-embed-text", "v2"}, {"local-mock-embed", "chunk-v1"}, {"other-model", "v1.5"}} {
+		if _, ok := AnswerMinSimilarity(c[0], c[1]); ok {
+			t.Fatalf("%s:%s must have no calibrated threshold", c[0], c[1])
+		}
+	}
+}
