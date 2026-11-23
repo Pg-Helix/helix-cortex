@@ -36,15 +36,12 @@ func main() {
 
 	authenticator := mustAuthenticator()
 
-	// Deliberately a distinct default revision from cmd/cortex's own
-	// "v1" default: this target_model is claimed by a worker instance
-	// running with CORTEX_INPUT_EXTRACTOR=chunk-text, which must never
-	// be the same target_model a "raw"-mode instance (Workflow 1's
-	// generic demo) claims -- they'd apply the wrong extraction strategy
-	// to each other's jobs.
-	modelID := getenv("CORTEX_CHUNK_MODEL_ID", "local-mock-embed")
-	modelRevision := getenv("CORTEX_CHUNK_MODEL_REVISION", "chunk-v1")
-	dims := getenvInt("CORTEX_CHUNK_MODEL_DIMS", 8)
+	profile, err := startupProfile()
+	if err != nil {
+		log.Fatalf("cortex-api: %v", err)
+	}
+	log.Printf("cortex-api: embedding profile: %s", profile)
+	modelID, modelRevision, dims := profile.ModelID, profile.Revision, profile.Dims
 	targetModel := modelID + ":" + modelRevision
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -60,7 +57,7 @@ func main() {
 	if err := reg.Register(protocol.Model{Id: modelID, Revision: modelRevision, Capability: protocol.Embed, Dims: &dims}); err != nil {
 		log.Fatalf("cortex-api: register model: %v", err)
 	}
-	provider, err := embedconfig.Build(dims)
+	provider, err := profile.NewProvider()
 	if err != nil {
 		log.Fatalf("cortex-api: %v", err)
 	}
@@ -97,21 +94,6 @@ func main() {
 		return
 	}
 
-	// Answer's evidence rule needs a similarity threshold calibrated for
-	// this exact model binding. A real provider without one must not
-	// start: it would either answer from any ranked passage or decline
-	// everything, both silently. Only mock embeddings, which have no
-	// semantic signal to threshold, run without the rule.
-	var answerMinSimilarity *float64
-	if t, ok := embedconfig.AnswerMinSimilarity(modelID, modelRevision); ok {
-		answerMinSimilarity = &t
-		log.Printf("cortex-api: /answers evidence rule: passage cosine similarity >= %.3f (%s:%s)", t, modelID, modelRevision)
-	} else if getenv("CORTEX_EMBED_PROVIDER", "mock") == "mock" {
-		log.Print("cortex-api: mock embeddings -- /answers evidence rule disabled (hash vectors carry no similarity signal)")
-	} else {
-		log.Fatalf("cortex-api: no calibrated /answers similarity threshold for model %s:%s (embedconfig.AnswerMinSimilarity)", modelID, modelRevision)
-	}
-
 	var hooks *testhooks.Registry
 	if os.Getenv("CORTEX_TEST_HOOKS") == "1" {
 		hooks = testhooks.NewRegistry()
@@ -129,7 +111,7 @@ func main() {
 			// evidence (helix-labs/eval/PROTOCOL.md Decision D) behind
 			// this opt-out.
 			DisableRerank:       os.Getenv("CORTEX_DISABLE_RERANK") == "1",
-			AnswerMinSimilarity: answerMinSimilarity,
+			AnswerMinSimilarity: profile.AnswerMinSimilarity,
 		},
 		Authenticator: authenticator,
 		Embedder:      embedder,
@@ -150,6 +132,32 @@ func main() {
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("cortex-api: %v", err)
 	}
+}
+
+// startupProfile resolves the one embedding profile this process uses
+// for the provider, source registration and the /answers rule
+// (embedconfig.Resolve), before any connection or listener exists.
+// Serving additionally requires a calibrated answer rule for a real
+// provider; the run-once backfill mode does not serve /answers, so a new
+// real revision can be registered and backfilled before it is calibrated
+// -- but no mode accepts a profile that misstates a calibrated identity.
+func startupProfile() (embedconfig.Profile, error) {
+	// Deliberately a distinct default revision from cmd/cortex's own
+	// "v1" default: this target_model is claimed by a worker instance
+	// running with CORTEX_INPUT_EXTRACTOR=chunk-text, which must never
+	// be the same target_model a "raw"-mode instance (Workflow 1's
+	// generic demo) claims.
+	profile, err := embedconfig.Resolve(getenv("CORTEX_CHUNK_MODEL_ID", "local-mock-embed"),
+		getenv("CORTEX_CHUNK_MODEL_REVISION", "chunk-v1"), getenvInt("CORTEX_CHUNK_MODEL_DIMS", 8))
+	if err != nil {
+		return embedconfig.Profile{}, err
+	}
+	if os.Getenv("CORTEX_BACKFILL_TENANT") == "" {
+		if err := profile.RequireAnswerRule(); err != nil {
+			return embedconfig.Profile{}, err
+		}
+	}
+	return profile, nil
 }
 
 // mustAuthenticator fails closed (ADR-0007 decision 1): there is no "no

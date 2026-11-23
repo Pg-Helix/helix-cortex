@@ -28,9 +28,17 @@ func main() {
 	if databaseURL == "" {
 		log.Fatal("cortex: DATABASE_URL is required (a connection authenticated as helix_worker or an equivalently restricted role)")
 	}
-	modelID := getenv("CORTEX_MODEL_ID", "local-mock-embed")
-	modelRevision := getenv("CORTEX_MODEL_REVISION", "v1")
-	dims := getenvInt("CORTEX_MODEL_DIMS", 8)
+	// The same validated profile embeds, names the target_model whose
+	// jobs this worker claims (and so the binding its vectors are
+	// published under) and supplies the document prefix: a mock provider
+	// or a mismatched wire tag/dims claiming a calibrated identity is
+	// refused here, before any job is claimed.
+	profile, err := workerProfile()
+	if err != nil {
+		log.Fatalf("cortex: %v", err)
+	}
+	log.Printf("cortex: embedding profile: %s", profile)
+	modelID, modelRevision, dims := profile.ModelID, profile.Revision, profile.Dims
 	leaseSeconds := getenvInt("CORTEX_LEASE_SECONDS", 30)
 	maxAttempts := getenvInt("CORTEX_MAX_ATTEMPTS", 5)
 	pollInterval := time.Duration(getenvInt("CORTEX_POLL_INTERVAL_MS", 500)) * time.Millisecond
@@ -56,7 +64,7 @@ func main() {
 
 	modelKey := embed.RegistryKey(modelID, modelRevision)
 	targetModel := modelID + ":" + modelRevision
-	provider, err := embedconfig.Build(dims)
+	provider, err := profile.NewProvider()
 	if err != nil {
 		log.Fatalf("cortex: %v", err)
 	}
@@ -91,7 +99,7 @@ func main() {
 		// the same lookup cortex-api's query-side embedding uses for
 		// "search_query: " -- composed here, not a string ingest.Split
 		// or ExtractChunkText itself would need to know about.
-		docPrefix := embedconfig.DocumentPrefix(modelID)
+		docPrefix := profile.DocumentPrefix
 		w.InputExtractor = func(raw json.RawMessage) (string, error) {
 			text, err := ingest.ExtractChunkText(raw)
 			if err != nil {
@@ -124,6 +132,13 @@ func main() {
 			}
 		}
 	}
+}
+
+// workerProfile resolves this worker's embedding profile from its own
+// env names (CORTEX_MODEL_*); defaults are Workflow 1's raw mock worker.
+func workerProfile() (embedconfig.Profile, error) {
+	return embedconfig.Resolve(getenv("CORTEX_MODEL_ID", "local-mock-embed"),
+		getenv("CORTEX_MODEL_REVISION", "v1"), getenvInt("CORTEX_MODEL_DIMS", 8))
 }
 
 func getenv(key, fallback string) string {

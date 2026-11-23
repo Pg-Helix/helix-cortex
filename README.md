@@ -38,6 +38,18 @@ Running the SQL as `helix_cortex_api` fails by design (`permission denied
 for schema cortex`): the runtime credential cannot create or alter schema
 objects. See helix-foundry's README for the Compose invocation.
 
+## Embedding profile and the `/answers` rule
+
+Both binaries resolve one embedding profile at startup (`internal/embedconfig.Resolve`) and log it as `embedding profile: ...`. The profile covers the provider, internal model id and revision, wire model, dimensions and query/document prefixes. The metric is always cosine, fixed in the SQL. The provider, the identity that vectors are written under and the `/answers` similarity threshold all come from that one profile.
+
+- The calibrated profile is `openai-compat`, `nomic-embed-text:v1.5`, wire tag `nomic-embed-text:v1.5`, 768 dimensions, with Nomic's `search_query: ` / `search_document: ` prefixes. Only that exact profile activates the 0.707 threshold (helix-atlas ADR-0008).
+- A configuration that claims that identity with any other provider (including mock), wire tag or dimensionality is refused by the API, the backfill mode and the worker before they connect.
+- A real provider without a calibrated profile can be registered and backfilled, but `cortex-api` will not serve with it.
+- Mock bindings run without the rule.
+- `sh ci/startup-matrix.sh` prints every case.
+
+Cortex can only check the configuration. It cannot see which weights an OpenAI-compatible endpoint actually serves, because any server can answer to a familiar tag. That guarantee comes from helix-foundry: its Ollama image bakes in the pinned weights digest and fails the build on a mismatch. helix-labs also checks the running manifest's digest against the pin before every evaluation.
+
 ## Build and test
 
 ```
