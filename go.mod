@@ -3,13 +3,13 @@ module github.com/Pg-Helix/helix-cortex
 go 1.26.4
 
 require (
-	github.com/Pg-Helix/helix-infer v0.0.0-20261021182435-444d5213ccb9
+	github.com/Pg-Helix/helix-infer v0.0.0-20261030170302-b577bff4e6a3
+	github.com/Pg-Helix/helix-protocol v0.0.0-20261122151657-9ada018776e9
+	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.11.0
 )
 
 require (
-	github.com/Pg-Helix/helix-protocol v0.0.0-20261029134551-e6e2a835bb25 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect

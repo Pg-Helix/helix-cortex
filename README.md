@@ -7,7 +7,7 @@ Connectors, ingestion, embeddings, semantic catalog, retrieval, RAG and evaluati
 | Ownership group | AI and Retrieval |
 | Primary form | Go / SQL |
 | Visibility | PUBLIC |
-| Status | **C1: worker only.** `cmd/cortex` claims a job, fetches its bounded input via `helix_ai.get_job_input`, embeds it with helix-infer's deterministic Mock provider, and publishes through `helix_ai.publish_result` — the smallest real workflow-1 slice. Connectors/ingestion/retrieval/catalog/evaluation below are still design only. |
+| Status | **Workflow 1 worker + Workflow 2 ingestion/retrieval API (unmerged feature branches).** `cmd/cortex` is the claim/embed/publish worker (also run as the chunk-worker). `cmd/cortex-api` serves authorized ingestion, hybrid FTS+pgvector search with a deterministic reranker, extractive answers with citations, and evidence lookup (ADR-0007). Embeddings come from helix-infer: Mock by default, or an OpenAI-compatible endpoint (`CORTEX_EMBED_PROVIDER=openai-compat`). Connectors, semantic catalog and generative RAG are still design only. See helix-labs `MANIFEST.md` for the tested commits. |
 
 Design source of truth: the private `helix-atlas` repository (`architecture/repos/helix-cortex.md`).
 Organization master prompt: PgHelix Organization Master Prompt, 16 Oct 2026.
@@ -25,6 +25,31 @@ Registers and embeds with a deterministic, no-network mock model
 (`CORTEX_MODEL_ID`/`CORTEX_MODEL_REVISION`/`CORTEX_MODEL_DIMS`, defaults
 `local-mock-embed:v1`, 8 dims) — no paid provider or external credential.
 See `internal/worker` for the claim/fetch-input/embed/publish logic.
+
+## Schema migrations (`migrations/`)
+
+`migrations/migrate.sh` is the only supported way to apply `cortex` schema
+changes. It applies `*.sql` in order, one transaction per file, and records
+each file's checksum in `cortex.schema_migrations`. A rerun applies nothing,
+and an edited, already-applied file is refused. Connect it as a trusted setup
+role through the standard `PG*` variables (for example the Foundry bootstrap
+admin). It then switches to `SET ROLE helix_cortex_owner` for the DDL.
+Running the SQL as `helix_cortex_api` fails by design (`permission denied
+for schema cortex`): the runtime credential cannot create or alter schema
+objects. See helix-foundry's README for the Compose invocation.
+
+## Embedding profile and the `/answers` rule
+
+Both binaries resolve one embedding profile at startup (`internal/embedconfig.Resolve`) and log it as `embedding profile: ...`. The profile covers the provider, internal model id and revision, wire model, dimensions and query/document prefixes. The metric is always cosine, fixed in the SQL. The provider, the identity that vectors are written under and the `/answers` similarity threshold all come from that one profile.
+
+- The calibrated profile is `openai-compat`, `nomic-embed-text:v1.5`, wire tag `nomic-embed-text:v1.5`, 768 dimensions, with Nomic's `search_query: ` / `search_document: ` prefixes. Only that exact profile activates the 0.707 threshold (helix-atlas ADR-0008).
+- A configuration that claims that identity with any other provider (including mock), wire tag or dimensionality is refused by the API, the backfill mode and the worker before they connect.
+- That calibration embedded each passage as `search_document: ` followed by the chunk's text. A worker claiming that identity must therefore set `CORTEX_INPUT_EXTRACTOR=chunk-text`. Explicit `raw` (the serialized row) and an absent or empty setting are refused before any job is claimed. The worker logs its effective `input_extractor` and `document_prefix` when it enters its loop.
+- A real provider without a calibrated profile can be registered and backfilled, but `cortex-api` will not serve with it.
+- Mock bindings run without the rule.
+- `sh ci/startup-matrix.sh` starts both binaries under every case and fails if any row has the wrong outcome, times out, or lacks its expected log line.
+
+Cortex can only check the configuration. It cannot see which weights an OpenAI-compatible endpoint actually serves, because any server can answer to a familiar tag. That guarantee comes from helix-foundry: its Ollama image bakes in the pinned weights digest and fails the build on a mismatch. helix-labs also checks the running manifest's digest against the pin before every evaluation.
 
 ## Build and test
 

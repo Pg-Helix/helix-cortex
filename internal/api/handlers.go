@@ -220,7 +220,16 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	if body.TopK != nil {
 		topK = *body.TopK
 	}
-	results, err := s.Store.Search(r.Context(), p, body.CollectionId, body.Query, topK, s.Embedder, s.TargetModel)
+	var results []protocol.SearchResult
+	var err error
+	// X-Eval-Stage: test-only instrumentation for helix-labs/eval, same
+	// gate as the in-flight-revocation barrier -- never reachable unless
+	// CORTEX_TEST_HOOKS=1.
+	if s.TestHooks != nil && r.Header.Get("X-Eval-Stage") != "" {
+		results, err = s.Store.SearchStage(r.Context(), p, body.CollectionId, body.Query, topK, s.Embedder, s.TargetModel, r.Header.Get("X-Eval-Stage"))
+	} else {
+		results, err = s.Store.Search(r.Context(), p, body.CollectionId, body.Query, topK, s.Embedder, s.TargetModel)
+	}
 	if err != nil {
 		writeError(w, err)
 		return

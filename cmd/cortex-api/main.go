@@ -20,6 +20,7 @@ import (
 
 	"github.com/Pg-Helix/helix-cortex/internal/api"
 	"github.com/Pg-Helix/helix-cortex/internal/auth"
+	"github.com/Pg-Helix/helix-cortex/internal/embedconfig"
 	"github.com/Pg-Helix/helix-cortex/internal/store"
 	"github.com/Pg-Helix/helix-cortex/internal/testhooks"
 	"github.com/Pg-Helix/helix-infer/embed"
@@ -35,15 +36,12 @@ func main() {
 
 	authenticator := mustAuthenticator()
 
-	// Deliberately a distinct default revision from cmd/cortex's own
-	// "v1" default: this target_model is claimed by a worker instance
-	// running with CORTEX_INPUT_EXTRACTOR=chunk-text, which must never
-	// be the same target_model a "raw"-mode instance (Workflow 1's
-	// generic demo) claims -- they'd apply the wrong extraction strategy
-	// to each other's jobs.
-	modelID := getenv("CORTEX_CHUNK_MODEL_ID", "local-mock-embed")
-	modelRevision := getenv("CORTEX_CHUNK_MODEL_REVISION", "chunk-v1")
-	dims := getenvInt("CORTEX_CHUNK_MODEL_DIMS", 8)
+	profile, err := startupProfile()
+	if err != nil {
+		log.Fatalf("cortex-api: %v", err)
+	}
+	log.Printf("cortex-api: embedding profile: %s", profile)
+	modelID, modelRevision, dims := profile.ModelID, profile.Revision, profile.Dims
 	targetModel := modelID + ":" + modelRevision
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -59,9 +57,41 @@ func main() {
 	if err := reg.Register(protocol.Model{Id: modelID, Revision: modelRevision, Capability: protocol.Embed, Dims: &dims}); err != nil {
 		log.Fatalf("cortex-api: register model: %v", err)
 	}
-	embedder, err := embed.NewEmbedder(reg, embed.RegistryKey(modelID, modelRevision), embed.NewMock(dims), embed.Options{MaxConcurrency: 4})
+	provider, err := profile.NewProvider()
+	if err != nil {
+		log.Fatalf("cortex-api: %v", err)
+	}
+	embedder, err := embed.NewEmbedder(reg, embed.RegistryKey(modelID, modelRevision), provider, embed.Options{MaxConcurrency: 4})
 	if err != nil {
 		log.Fatalf("cortex-api: build embedder: %v", err)
+	}
+
+	// --backfill-tenant mode: an explicit, administrator-invoked, run-
+	// once-and-exit operation for a binding cutover's backlog (e.g.
+	// mock -> real) -- never wired into a request's hot path, so this
+	// scan's cost is never paid by ordinary search/answer/ingest
+	// traffic. Loops in bounded batches (store.BackfillTenant) until a
+	// pass schedules nothing; safe to stop and re-run at any point.
+	if tenant := os.Getenv("CORTEX_BACKFILL_TENANT"); tenant != "" {
+		st := &store.Store{Pool: pool, ChunkModelID: modelID, ChunkModelRevision: modelRevision, ChunkDims: dims}
+		sourceID, err := st.EnsureActiveSourceID(ctx, tenant)
+		if err != nil {
+			log.Fatalf("cortex-api: backfill: resolve active source for tenant %q: %v", tenant, err)
+		}
+		total := 0
+		for {
+			scheduled, err := st.BackfillTenant(ctx, tenant, sourceID)
+			if err != nil {
+				log.Fatalf("cortex-api: backfill: %v", err)
+			}
+			total += scheduled
+			if scheduled == 0 {
+				break
+			}
+			log.Printf("cortex-api: backfill: scheduled %d chunk(s) for tenant %q under source_id=%d (running total %d)", scheduled, tenant, sourceID, total)
+		}
+		log.Printf("cortex-api: backfill: done -- %d chunk(s) scheduled for tenant %q under source_id=%d", total, tenant, sourceID)
+		return
 	}
 
 	var hooks *testhooks.Registry
@@ -76,6 +106,12 @@ func main() {
 			ChunkModelID:       modelID,
 			ChunkModelRevision: modelRevision,
 			ChunkDims:          dims,
+			// Default off (reranker stays on, unchanged behavior) --
+			// see Store.DisableRerank's doc comment for the measured
+			// evidence (helix-labs/eval/PROTOCOL.md Decision D) behind
+			// this opt-out.
+			DisableRerank:       os.Getenv("CORTEX_DISABLE_RERANK") == "1",
+			AnswerMinSimilarity: profile.AnswerMinSimilarity,
 		},
 		Authenticator: authenticator,
 		Embedder:      embedder,
@@ -96,6 +132,32 @@ func main() {
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("cortex-api: %v", err)
 	}
+}
+
+// startupProfile resolves the one embedding profile this process uses
+// for the provider, source registration and the /answers rule
+// (embedconfig.Resolve), before any connection or listener exists.
+// Serving additionally requires a calibrated answer rule for a real
+// provider; the run-once backfill mode does not serve /answers, so a new
+// real revision can be registered and backfilled before it is calibrated
+// -- but no mode accepts a profile that misstates a calibrated identity.
+func startupProfile() (embedconfig.Profile, error) {
+	// Deliberately a distinct default revision from cmd/cortex's own
+	// "v1" default: this target_model is claimed by a worker instance
+	// running with CORTEX_INPUT_EXTRACTOR=chunk-text, which must never
+	// be the same target_model a "raw"-mode instance (Workflow 1's
+	// generic demo) claims.
+	profile, err := embedconfig.Resolve(getenv("CORTEX_CHUNK_MODEL_ID", "local-mock-embed"),
+		getenv("CORTEX_CHUNK_MODEL_REVISION", "chunk-v1"), getenvInt("CORTEX_CHUNK_MODEL_DIMS", 8))
+	if err != nil {
+		return embedconfig.Profile{}, err
+	}
+	if os.Getenv("CORTEX_BACKFILL_TENANT") == "" {
+		if err := profile.RequireAnswerRule(); err != nil {
+			return embedconfig.Profile{}, err
+		}
+	}
+	return profile, nil
 }
 
 // mustAuthenticator fails closed (ADR-0007 decision 1): there is no "no

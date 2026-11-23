@@ -17,6 +17,10 @@ jobs:
       - run: go build ./...
       - run: go vet ./...
       - run: go test ./... -race -cover
+      # Builds both binaries and starts them under each embedding profile
+      # (no database or model endpoint needed); fails if the supported API
+      # and chunk-worker do not resolve the same profile.
+      - run: sh ci/startup-matrix.sh
 
   # Real-database integration test, with its own job (not folded into
   # `test` above) so it's unmissable in the checks list. This job must
