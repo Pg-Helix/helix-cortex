@@ -46,7 +46,7 @@ func TestResolve_DefaultsToMockWithoutRule(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if p.Provider != "mock" || p.AnswerMinSimilarity != nil || p.RequireAnswerRule() != nil {
+		if p.Provider != "mock" || p.AnswerMinSimilarity != nil || p.RequireAnswerRule() != nil || p.DocumentInput != "" {
 			t.Fatalf("ordinary mock: %s", p)
 		}
 		if prov, err := p.NewProvider(); err != nil || prov == nil {
@@ -78,7 +78,8 @@ func TestResolve_SupportedProfileActivatesTheCalibratedRule(t *testing.T) {
 		if p.AnswerMinSimilarity == nil || *p.AnswerMinSimilarity != 0.707 || p.RequireAnswerRule() != nil {
 			t.Fatalf("supported profile: %s", p)
 		}
-		if p.QueryPrefix != "search_query: " || p.DocumentPrefix != "search_document: " || p.WireModel != "nomic-embed-text:v1.5" {
+		if p.QueryPrefix != "search_query: " || p.DocumentPrefix != "search_document: " || p.WireModel != "nomic-embed-text:v1.5" ||
+			p.DocumentInput != "chunk-text" || !strings.Contains(p.String(), "document_input=chunk-text") {
 			t.Fatalf("supported profile: %s", p)
 		}
 		if prov, err := p.NewProvider(); err != nil || prov == nil {

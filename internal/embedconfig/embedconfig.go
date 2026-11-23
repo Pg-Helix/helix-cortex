@@ -38,6 +38,11 @@ type Profile struct {
 	// AnswerMinSimilarity is set iff this profile exactly matches a
 	// calibrated one (calibrations below); nil otherwise.
 	AnswerMinSimilarity *float64
+	// DocumentInput is the worker input extractor a calibrated profile's
+	// vectors were produced with ("chunk-text": DocumentPrefix + the
+	// chunk row's text field); "" when the profile imposes none. A worker
+	// claiming this identity must use exactly it (cmd/cortex).
+	DocumentInput string
 
 	baseURL    string
 	apiKey     string
@@ -52,6 +57,7 @@ type calibration struct {
 	provider, modelID, revision, wireModel string
 	dims                                   int
 	queryPrefix, documentPrefix            string
+	documentInput                          string
 	answerMinSimilarity                    float64
 }
 
@@ -75,6 +81,10 @@ var calibrations = []calibration{{
 	provider: "openai-compat", modelID: "nomic-embed-text", revision: "v1.5",
 	wireModel: "nomic-embed-text:v1.5", dims: 768,
 	queryPrefix: "search_query: ", documentPrefix: "search_document: ",
+	// The calibration embedded each passage as "search_document: " + its
+	// text (helix-labs/eval/calibrate.py), i.e. the chunk-text extractor
+	// -- never the serialized chunk row the raw extractor would send.
+	documentInput:       "chunk-text",
 	answerMinSimilarity: 0.707,
 }}
 
@@ -126,6 +136,7 @@ func Resolve(modelID, revision string, dims int) (Profile, error) {
 		}
 		t := c.answerMinSimilarity
 		p.AnswerMinSimilarity = &t
+		p.DocumentInput = c.documentInput
 	}
 	return p, nil
 }
@@ -162,8 +173,12 @@ func (p Profile) String() string {
 	if p.AnswerMinSimilarity != nil {
 		rule = fmt.Sprintf("cosine>=%.3f", *p.AnswerMinSimilarity)
 	}
-	return fmt.Sprintf("provider=%s model=%s:%s wire_model=%q dims=%d metric=cosine query_prefix=%q document_prefix=%q answer_rule=%s",
-		p.Provider, p.ModelID, p.Revision, p.WireModel, p.Dims, p.QueryPrefix, p.DocumentPrefix, rule)
+	input := p.DocumentInput
+	if input == "" {
+		input = "any"
+	}
+	return fmt.Sprintf("provider=%s model=%s:%s wire_model=%q dims=%d metric=cosine query_prefix=%q document_prefix=%q document_input=%s answer_rule=%s",
+		p.Provider, p.ModelID, p.Revision, p.WireModel, p.Dims, p.QueryPrefix, p.DocumentPrefix, input, rule)
 }
 
 // QueryPrefix and DocumentPrefix return the task-instruction prefix a

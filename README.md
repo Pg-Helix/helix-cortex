@@ -44,9 +44,10 @@ Both binaries resolve one embedding profile at startup (`internal/embedconfig.Re
 
 - The calibrated profile is `openai-compat`, `nomic-embed-text:v1.5`, wire tag `nomic-embed-text:v1.5`, 768 dimensions, with Nomic's `search_query: ` / `search_document: ` prefixes. Only that exact profile activates the 0.707 threshold (helix-atlas ADR-0008).
 - A configuration that claims that identity with any other provider (including mock), wire tag or dimensionality is refused by the API, the backfill mode and the worker before they connect.
+- That calibration embedded each passage as `search_document: ` followed by the chunk's text. A worker claiming that identity must therefore set `CORTEX_INPUT_EXTRACTOR=chunk-text`. Explicit `raw` (the serialized row) and an absent or empty setting are refused before any job is claimed. The worker logs its effective `input_extractor` and `document_prefix` when it enters its loop.
 - A real provider without a calibrated profile can be registered and backfilled, but `cortex-api` will not serve with it.
 - Mock bindings run without the rule.
-- `sh ci/startup-matrix.sh` prints every case.
+- `sh ci/startup-matrix.sh` starts both binaries under every case and fails if any row has the wrong outcome, times out, or lacks its expected log line.
 
 Cortex can only check the configuration. It cannot see which weights an OpenAI-compatible endpoint actually serves, because any server can answer to a familiar tag. That guarantee comes from helix-foundry: its Ollama image bakes in the pinned weights digest and fails the build on a mismatch. helix-labs also checks the running manifest's digest against the pin before every evaluation.
 
